@@ -26,13 +26,14 @@ from enum import Enum
 import numpy as np
 from ruckig import InputParameter, OutputParameter, Result, Ruckig, ControlInterface
 from threadpoolctl import threadpool_limits
-from constants import h_x, h_y, ENCODER_MAGNET_OFFSETS, ANALOG_FULL_V, MIN_SUPPLY_VOLTAGE
-from constants import SPARK_KV, SPARK_KS_STEER, SPARK_KS_DRIVE, SPARK_KP, SPARK_KI, SPARK_KD_STEER, SPARK_KD_DRIVE
+from constants import h_x, h_y, ENCODER_MAGNET_OFFSETS, ANALOG_FULL_V, MIN_SUPPLY_VOLTAGE, DRIVE_MOTOR_SIGNS
+from constants import SPARK_KV, SPARK_KS_STEER, SPARK_KS_STEER_FULL_RPM, SPARK_KS_DRIVE, SPARK_KP_STEER, SPARK_KP_DRIVE, SPARK_KI, SPARK_KD_STEER, SPARK_KD_DRIVE
 from constants import SPARK_OUTPUT_MAX, SPARK_CURRENT_STEER_A, SPARK_CURRENT_DRIVE_A
 from constants import SPARK_CURRENT_LIMIT_RPM, SPARK_IDLE_BRAKE, SPARK_MAX_RPM
 from constants import POLICY_CONTROL_PERIOD
 from spark_can.protocol import (
-    PARAM_IDLE_MODE, PARAM_KP_0, PARAM_KI_0, PARAM_KD_0, PARAM_KV_0,
+    PARAM_IDLE_MODE, PARAM_CONTROL_TYPE, PARAM_SENSOR_TYPE,
+    PARAM_KP_0, PARAM_KI_0, PARAM_KD_0, PARAM_KV_0,
     PARAM_OUTPUT_MIN_0, PARAM_OUTPUT_MAX_0,
     PARAM_SMART_CURRENT_STALL, PARAM_SMART_CURRENT_FREE, PARAM_SMART_CURRENT_CONFIG,
     PARAM_HARD_LIMIT_FWD_EN, PARAM_HARD_LIMIT_REV_EN,
@@ -63,10 +64,13 @@ N_s_r2_w = N_s * N_r2 * N_w
 TWO_PI = 2 * math.pi
 
 def _spark_params(is_steer):
+    kp = SPARK_KP_STEER if is_steer else SPARK_KP_DRIVE
     kd = SPARK_KD_STEER if is_steer else SPARK_KD_DRIVE
     amps = SPARK_CURRENT_STEER_A if is_steer else SPARK_CURRENT_DRIVE_A
     return [
-        (PARAM_KP_0, 'float', SPARK_KP),
+        (PARAM_CONTROL_TYPE, 'uint', 1),
+        (PARAM_SENSOR_TYPE, 'uint', 1),
+        (PARAM_KP_0, 'float', kp),
         (PARAM_KI_0, 'float', SPARK_KI),
         (PARAM_KD_0, 'float', kd),
         (PARAM_KV_0, 'float', SPARK_KV),
@@ -113,6 +117,7 @@ class Caster:
         self.num = num
         self.steer_motor = Motor(2 * self.num - 1, rack)
         self.drive_motor = Motor(2 * self.num, rack)
+        self.drive_motor_sign = DRIVE_MOTOR_SIGNS[self.drive_motor.num]
         self.encoder_offset = ENCODER_MAGNET_OFFSETS[self.num - 1]
 
     def get_steer_position(self):
@@ -124,21 +129,22 @@ class Caster:
 
     def get_positions(self):
         steer_motor_pos = self.steer_motor.get_position()
-        drive_motor_pos = self.drive_motor.get_position()
+        drive_motor_pos = self.drive_motor_sign * self.drive_motor.get_position()
         steer_pos = self.get_steer_position()
         drive_pos = steer_motor_pos / N_s_r2_w - drive_motor_pos / N_r1_r2_w
         return steer_pos, drive_pos
 
     def get_velocities(self):
         steer_motor_vel = self.steer_motor.get_velocity()
-        drive_motor_vel = self.drive_motor.get_velocity()
+        drive_motor_vel = self.drive_motor_sign * self.drive_motor.get_velocity()
         steer_vel = steer_motor_vel / N_s
         drive_vel = steer_motor_vel / N_s_r2_w - drive_motor_vel / N_r1_r2_w
         return steer_vel, drive_vel
 
     def set_velocities(self, steer_vel, drive_vel):
         self.steer_motor.set_velocity(N_s * steer_vel)
-        self.drive_motor.set_velocity(N_r1 * steer_vel - N_r1_r2_w * drive_vel)
+        drive_motor_vel = N_r1 * steer_vel - N_r1_r2_w * drive_vel
+        self.drive_motor.set_velocity(self.drive_motor_sign * drive_motor_vel)
 
     def set_neutral(self):
         self.steer_motor.set_neutral()
@@ -168,7 +174,8 @@ class Vehicle:
             max_rpm=SPARK_MAX_RPM,
             command='velocity',
             # Odd CAN IDs are steer motors
-            ks_volts={num: SPARK_KS_STEER if num % 2 != 0 else SPARK_KS_DRIVE for num in range(1, 2 * NUM_CASTERS + 1)},
+            ks_volts={num: SPARK_KS_STEER[num] if num % 2 != 0 else SPARK_KS_DRIVE[num] for num in range(1, 2 * NUM_CASTERS + 1)},
+            ks_full_rpm=SPARK_KS_STEER_FULL_RPM,
         )
         try:
             for num in range(1, 2 * NUM_CASTERS + 1):
@@ -334,6 +341,13 @@ class Vehicle:
                 print(f'Warning: Step time {1000 * step_time:.3f} ms in {self.__class__.__name__} control_loop')
 
             # Update state
+            try:
+                self.rack.check_health()
+            except RuntimeError as exc:
+                self.rack.disarm()
+                self.control_loop_running = False
+                print(f'Base control stopped: {exc}; cause: {exc.__cause__}')
+                return
             self.update_state()
 
             # Global to local frame conversion
@@ -452,6 +466,7 @@ class Vehicle:
         t0 = time.time()
         try:
             while time.time() - t0 < seconds:
+                self.rack.check_health()
                 tel = self.rack.telemetry[device_id]
                 now = time.monotonic()
                 print(
@@ -509,6 +524,7 @@ class Vehicle:
                 t0 = time.time()
                 volts, speeds, amps, analog = [], [], [], []
                 while time.time() - t0 < seconds:
+                    self.rack.check_health()
                     tel = self.rack.telemetry[device_id]
                     analog.append(tel.analog_voltage)
                     if time.time() - t0 >= settle:

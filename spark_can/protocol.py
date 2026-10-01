@@ -40,11 +40,15 @@ ID_DUTY_CYCLE_SETPOINT = lambda i: arb_id(0, 2, i)
 ID_SET_STATUSES_ENABLED = lambda i: arb_id(1, 0, i)
 ID_SECONDARY_HEARTBEAT = lambda i: arb_id(11, 2, i)
 ID_PARAMETER_WRITE = lambda i: arb_id(14, 0, i)
+ID_PERSIST_PARAMETERS = lambda i: arb_id(63, 15, i)
+ID_PERSIST_RESPONSE = lambda i: 0x02050500 | (i & 0x3F)
 # WPILib Universal Heartbeat (FRC 2025+). SPARK 25+ enables on this, not device ID 0.
 ID_FRC_HEARTBEAT = 0x01011840
 
 # REVLib SparkParameters.h. Written to RAM only; nothing here burns EEPROM.
 PARAM_IDLE_MODE = 6  # uint: 0 coast, 1 brake
+PARAM_CONTROL_TYPE = 5  # uint: 1 velocity
+PARAM_SENSOR_TYPE = 9  # uint: 1 primary motor encoder
 PARAM_KP_0 = 13  # float, duty per RPM
 PARAM_KI_0 = 14
 PARAM_KD_0 = 15
@@ -144,6 +148,11 @@ def encode_parameter(param_id: int, kind: str, value: float) -> bytes:
     if kind == "uint":
         return struct.pack("<BI", param_id & 0xFF, int(value) & 0xFFFFFFFF)
     raise ValueError(kind)
+
+
+def encode_persist_parameters() -> bytes:
+    """Firmware 25.x persist-parameters key (0x3AA3), little endian."""
+    return (15011).to_bytes(2, "little")
 
 
 def decode_parameter_response(data: bytes) -> tuple[int, int, int, int] | None:

@@ -8,12 +8,16 @@ import select
 import struct
 import termios
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 
 class CanBus:
     def send(self, can_id: int, data: bytes) -> None:
         raise NotImplementedError
+
+    def send_many(self, frames: Iterable[tuple[int, bytes]]) -> None:
+        for can_id, data in frames:
+            self.send(can_id, data)
 
     def recv(self, timeout: float) -> Optional[tuple[int, bytes]]:
         raise NotImplementedError
@@ -48,8 +52,25 @@ class SlcanBus(CanBus):
         return ports[0]
 
     def _cmd(self, s: str, wait: float = 0.08) -> bytes:
-        os.write(self.fd, s.encode())
+        self._write_all(s.encode())
         return self._read_raw(wait)
+
+    def _write_all(self, data: bytes, timeout: float = 0.02) -> None:
+        """Handle CDC backpressure and short writes without an unbounded wait."""
+        pending = memoryview(data)
+        deadline = time.monotonic() + timeout
+        while pending:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("SLCAN serial write timed out")
+            try:
+                written = os.write(self.fd, pending)
+            except BlockingIOError:
+                written = 0
+            if written:
+                pending = pending[written:]
+            else:
+                remaining = max(0.0, deadline - time.monotonic())
+                select.select([], [self.fd], [], remaining)
 
     def _read_raw(self, dt: float) -> bytes:
         data = b""
@@ -63,10 +84,15 @@ class SlcanBus(CanBus):
         return data
 
     def send(self, can_id: int, data: bytes) -> None:
-        if len(data) > 8:
-            raise ValueError("classic CAN max 8 bytes")
-        line = f"T{can_id:08X}{len(data):X}{data.hex().upper()}\r"
-        os.write(self.fd, line.encode())
+        self.send_many([(can_id, data)])
+
+    def send_many(self, frames: Iterable[tuple[int, bytes]]) -> None:
+        lines = []
+        for can_id, data in frames:
+            if len(data) > 8:
+                raise ValueError("classic CAN max 8 bytes")
+            lines.append(f"T{can_id:08X}{len(data):X}{data.hex().upper()}\r")
+        self._write_all("".join(lines).encode())
 
     def recv(self, timeout: float) -> Optional[tuple[int, bytes]]:
         end = time.time() + timeout
@@ -100,8 +126,8 @@ class SlcanBus(CanBus):
 
     def close(self) -> None:
         try:
-            os.write(self.fd, b"C\r")
-        except OSError:
+            self._write_all(b"C\r")
+        except (OSError, TimeoutError):
             pass
         os.close(self.fd)
 

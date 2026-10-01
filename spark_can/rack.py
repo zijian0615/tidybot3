@@ -17,6 +17,8 @@ from .protocol import (
     ID_DUTY_CYCLE_SETPOINT,
     ID_FRC_HEARTBEAT,
     ID_PARAMETER_WRITE,
+    ID_PERSIST_PARAMETERS,
+    ID_PERSIST_RESPONSE,
     ID_SECONDARY_HEARTBEAT,
     ID_SET_STATUSES_ENABLED,
     ID_VELOCITY_SETPOINT,
@@ -33,6 +35,7 @@ from .protocol import (
     encode_enable_status2,
     encode_frc_heartbeat,
     encode_parameter,
+    encode_persist_parameters,
     encode_secondary_heartbeat,
     encode_velocity,
     is_spark,
@@ -62,8 +65,9 @@ class SparkMaxRack:
         max_duty: float = 0.25,
         max_rpm: float = 500.0,
         command: str = "velocity",
-        ks_volts: float | Dict[int, float] = 0.0,
+        ks_volts: float | Dict[int, float | tuple[float, float]] = 0.0,
         ks_deadband_rpm: float = 1.0,
+        ks_full_rpm: float | Dict[int, float] | None = None,
     ):
         if command not in ("velocity", "duty"):
             raise ValueError(command)
@@ -74,11 +78,25 @@ class SparkMaxRack:
         self.max_rpm = max_rpm
         self.command = command
         # Static friction the SPARK kV cannot cover, sent as arbitrary feedforward.
-        if isinstance(ks_volts, dict):
-            self.ks_volts = {i: float(ks_volts.get(i, 0.0)) for i in self.device_ids}
-        else:
-            self.ks_volts = {i: float(ks_volts) for i in self.device_ids}
+        values = {i: ks_volts.get(i, 0.0) for i in self.device_ids} if isinstance(ks_volts, dict) else {i: ks_volts for i in self.device_ids}
+        self.ks_volts_negative = {}
+        self.ks_volts_positive = {}
+        for device_id, value in values.items():
+            if isinstance(value, (tuple, list)):
+                negative, positive = value
+            else:
+                negative = positive = value
+            self.ks_volts_negative[device_id] = float(negative)
+            self.ks_volts_positive[device_id] = float(positive)
         self.ks_deadband_rpm = ks_deadband_rpm
+        if isinstance(ks_full_rpm, dict):
+            self.ks_full_rpm = {
+                i: max(float(ks_full_rpm.get(i, ks_deadband_rpm)), ks_deadband_rpm)
+                for i in self.device_ids
+            }
+        else:
+            full_rpm = ks_deadband_rpm if ks_full_rpm is None else max(float(ks_full_rpm), ks_deadband_rpm)
+            self.ks_full_rpm = {i: full_rpm for i in self.device_ids}
         self._duties = {i: 0.0 for i in self.device_ids}
         self._rpms = {i: 0.0 for i in self.device_ids}
         self.telemetry: Dict[int, Telemetry] = {i: Telemetry() for i in self.device_ids}
@@ -88,6 +106,13 @@ class SparkMaxRack:
         self._lock = threading.Lock()
         self._bus_lock = threading.Lock()
         self._frc_heartbeat_active = False
+        self._error: Optional[Exception] = None
+
+    def check_health(self) -> None:
+        if self._error is not None:
+            raise RuntimeError("CAN communication thread failed") from self._error
+        if not self._run or self._thread is None or not self._thread.is_alive():
+            raise RuntimeError("CAN communication thread is not running")
 
     @classmethod
     def open(cls, **kwargs) -> "SparkMaxRack":
@@ -137,6 +162,29 @@ class SparkMaxRack:
                     return echoed
         raise RuntimeError(f"SPARK {device_id} did not acknowledge parameter {param_id} after {attempts} attempts")
 
+    def persist_parameters(self, device_id: int, timeout: float = 1.0, attempts: int = 3) -> None:
+        """Persist the current RAM configuration and verify the firmware response."""
+        if self._run:
+            raise RuntimeError("persist_parameters must run before the CAN thread starts")
+        with self._bus_lock:
+            for _ in range(attempts):
+                self.bus.send(ID_PERSIST_PARAMETERS(device_id), encode_persist_parameters())
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    pkt = self.bus.recv(max(0.0, deadline - time.time()))
+                    if pkt is None:
+                        break
+                    can_id, data = pkt
+                    self._handle_rx(can_id, data)
+                    if can_id != ID_PERSIST_RESPONSE(device_id):
+                        continue
+                    if data and data[0] == 0:
+                        return
+                    raise RuntimeError(
+                        f"SPARK {device_id} persist failed: {data.hex() or 'empty response'}"
+                    )
+        raise RuntimeError(f"SPARK {device_id} did not acknowledge persisted parameters")
+
     def start(self) -> None:
         payload = encode_enable_status2()
         with self._bus_lock:
@@ -150,6 +198,7 @@ class SparkMaxRack:
     def arm(self) -> None:
         """Enable output. Setpoints stay at the last set_velocity/set_duty values."""
         with self._lock:
+            self.check_health()
             self._enable_output = True
             self._frc_heartbeat_active = True
 
@@ -188,6 +237,31 @@ class SparkMaxRack:
             self.bus.close()
 
     def _loop(self) -> None:
+        try:
+            self._run_loop()
+        except Exception as exc:
+            with self._lock:
+                self._error = exc
+                self._enable_output = False
+                self._run = False
+                for i in self.device_ids:
+                    self._duties[i] = 0.0
+                    self._rpms[i] = 0.0
+            # Transport may be broken. Stop enabled heartbeats; try one disable
+            # batch, then let the controllers' heartbeat watchdog expire.
+            frames = [(ID_FRC_HEARTBEAT, encode_frc_heartbeat(False))]
+            for i in self.device_ids:
+                frames.extend([
+                    (ID_SECONDARY_HEARTBEAT(i), encode_secondary_heartbeat(self.device_ids, False)),
+                    (ID_VELOCITY_SETPOINT(i), encode_velocity(0.0)),
+                ])
+            try:
+                with self._bus_lock:
+                    self.bus.send_many(frames)
+            except Exception:
+                pass
+
+    def _run_loop(self) -> None:
         next_t = time.perf_counter()
         while self._run:
             with self._lock:
@@ -197,17 +271,30 @@ class SparkMaxRack:
                 send_frc = enable or self._frc_heartbeat_active
                 self._frc_heartbeat_active = enable
             with self._bus_lock:
+                frames = []
                 if send_frc:
-                    self.bus.send(ID_FRC_HEARTBEAT, encode_frc_heartbeat(enable))
+                    frames.append((ID_FRC_HEARTBEAT, encode_frc_heartbeat(enable)))
                 hb = encode_secondary_heartbeat(self.device_ids, enable)
                 for i in self.device_ids:
-                    self.bus.send(ID_SECONDARY_HEARTBEAT(i), hb)
+                    frames.append((ID_SECONDARY_HEARTBEAT(i), hb))
                     if self.command == "velocity":
                         rpm = rpms[i] if enable else 0.0
-                        ff = math.copysign(self.ks_volts[i], rpm) if abs(rpm) >= self.ks_deadband_rpm else 0.0
-                        self.bus.send(ID_VELOCITY_SETPOINT(i), encode_velocity(rpm, ff))
+                        magnitude = abs(rpm)
+                        if magnitude >= self.ks_deadband_rpm:
+                            span = self.ks_full_rpm[i] - self.ks_deadband_rpm
+                            scale = 1.0 if span <= 0.0 else min(
+                                1.0, (magnitude - self.ks_deadband_rpm) / span
+                            )
+                            ff = scale * (
+                                self.ks_volts_positive[i] if rpm > 0.0
+                                else -self.ks_volts_negative[i]
+                            )
+                        else:
+                            ff = 0.0
+                        frames.append((ID_VELOCITY_SETPOINT(i), encode_velocity(rpm, ff)))
                     else:
-                        self.bus.send(ID_DUTY_CYCLE_SETPOINT(i), encode_duty(duties[i] if enable else 0.0))
+                        frames.append((ID_DUTY_CYCLE_SETPOINT(i), encode_duty(duties[i] if enable else 0.0)))
+                self.bus.send_many(frames)
                 deadline = time.perf_counter() + self.period_s * 0.7
                 while time.perf_counter() < deadline:
                     pkt = self.bus.recv(max(0.0, deadline - time.perf_counter()))

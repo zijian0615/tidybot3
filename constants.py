@@ -1,4 +1,23 @@
 import numpy as np
+from spark_config_values import (
+    DRIVE_MOTOR_SIGNS,
+    ENCODER_MAGNET_OFFSETS,
+    SPARK_CURRENT_DRIVE_A,
+    SPARK_CURRENT_LIMIT_RPM,
+    SPARK_CURRENT_STEER_A,
+    SPARK_IDLE_BRAKE,
+    SPARK_KD_DRIVE,
+    SPARK_KD_STEER,
+    SPARK_KI,
+    SPARK_KP_DRIVE,
+    SPARK_KP_STEER,
+    SPARK_KS_DRIVE,
+    SPARK_KS_STEER,
+    SPARK_KS_STEER_FULL_RPM,
+    SPARK_KV,
+    SPARK_MAX_RPM,
+    SPARK_OUTPUT_MAX,
+)
 
 ################################################################################
 # Mobile base
@@ -10,8 +29,8 @@ h_x, h_y = 0.190150 * np.array([1.0, 1.0, -1.0, -1.0]), 0.170150 * np.array([-1.
 # Thrifty analog on the steer SPARKs: turns, so 0 rad is wheel-forward.
 # anaV / 3.3 (Thrifty full scale). Filled from a live Status 3 read; 0 V is a valid angle, not a disconnect.
 ANALOG_FULL_V = 3.3
-# Measured 2026-09-29 on the chassis, wheels aligned forward, Thrifty on 5 V (0-3.3 V out), 3 s average.
-ENCODER_MAGNET_OFFSETS = [0.9185, 0.6174, 0.8253, 0.1603]
+# Measured 2026-09-30 on the chassis after reseating the ID 7 breakout,
+# wheels manually aligned forward, 3 s average.
 
 # SPARK slot-0 velocity loop.
 # kP is duty cycle per RPM. kV is volts per RPM: the SPARK divides it by bus voltage.
@@ -21,20 +40,16 @@ ENCODER_MAGNET_OFFSETS = [0.9185, 0.6174, 0.8253, 0.1603]
 # These are not TalonFX gains. Output clamp and smart-current limits stand in
 # for TalonFX torque-current limits.
 MIN_SUPPLY_VOLTAGE = 11.5
-SPARK_KV = 0.0022
-# V, --fit-kv intercepts at 50-150 RPM (SPARKs 1/3 steer, SPARK 2 drive); sent as arbitrary FF
-SPARK_KS_STEER = 0.11
-SPARK_KS_DRIVE = 0.13
-SPARK_KP = 0.0001
-SPARK_KI = 0.0
-SPARK_KD_STEER = 1.0e-5
-SPARK_KD_DRIVE = 0.0
-SPARK_OUTPUT_MAX = 0.25
-SPARK_CURRENT_STEER_A = 20
-SPARK_CURRENT_DRIVE_A = 10
-SPARK_CURRENT_LIMIT_RPM = 20000
-SPARK_IDLE_BRAKE = 1
-SPARK_MAX_RPM = 500.0
+# V, per-motor static-friction compensation measured at +/-50 RPM with the
+# caster unloaded. Steering friction varies enough that one shared value either
+# stalls motor 1 or overspeeds motors 3/7.
+# Ramp steering static-friction feedforward from zero to its calibrated value
+# across this command range. This avoids a full +/-kS step whenever a caster's
+# steering command crosses zero.
+# (negative-RPM, positive-RPM) ground-load compensation in volts. Directional
+# values account for drivetrain friction and the reversed physical ID 4 motor.
+# Normalize drive motor shaft direction to the chassis convention. CAN ID 4 is
+# physically installed/wired opposite to IDs 2, 6, and 8.
 
 ################################################################################
 # Teleop and imitation learning
