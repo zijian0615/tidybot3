@@ -12,12 +12,14 @@ matplotlib==3.8.4
 mujoco==3.2.4
 pin==2.7.0
 ruckig==0.12.2
+xarm-python-sdk==1.18.5
 
 # Communication
 flask==3.0.2
 flask_socketio==5.3.6
 pyzmq==25.1.2
 redis==5.0.6
+hebi-py==2.16.1
 
 # Mobile base
 pygame==2.5.2

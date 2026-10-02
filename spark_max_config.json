@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_utc": "2026-10-01T04:40:26.168625+00:00",
+  "generated_utc": "2026-10-01T19:26:01.787985+00:00",
   "notes": "Persistent values live in each SPARK; host-side values are applied by the Raspberry Pi controller.",
   "devices": {
     "1": {
@@ -19,7 +19,7 @@
         "slot0_kP": {
           "parameter_id": 13,
           "kind": "float",
-          "value": 0.0004
+          "value": 0.0006
         },
         "slot0_kI": {
           "parameter_id": 14,
@@ -39,12 +39,12 @@
         "slot0_output_min": {
           "parameter_id": 19,
           "kind": "float",
-          "value": -0.25
+          "value": -0.35
         },
         "slot0_output_max": {
           "parameter_id": 20,
           "kind": "float",
-          "value": 0.25
+          "value": 0.35
         },
         "smart_current_stall_A": {
           "parameter_id": 59,
@@ -78,7 +78,7 @@
         }
       },
       "host_side_parameters": {
-        "absolute_encoder_forward_offset_turns": 0.884889,
+        "absolute_encoder_forward_offset_turns": 0.407924,
         "static_friction_feedforward_V": 0.48,
         "static_friction_full_rpm": 20.0
       }
@@ -99,7 +99,7 @@
         "slot0_kP": {
           "parameter_id": 13,
           "kind": "float",
-          "value": 0.0003
+          "value": 0.0005
         },
         "slot0_kI": {
           "parameter_id": 14,
@@ -119,182 +119,22 @@
         "slot0_output_min": {
           "parameter_id": 19,
           "kind": "float",
-          "value": -0.25
+          "value": -0.35
         },
         "slot0_output_max": {
           "parameter_id": 20,
           "kind": "float",
-          "value": 0.25
+          "value": 0.35
         },
         "smart_current_stall_A": {
           "parameter_id": 59,
           "kind": "uint",
-          "value": 10
+          "value": 15
         },
         "smart_current_free_A": {
           "parameter_id": 60,
           "kind": "uint",
-          "value": 10
-        },
-        "smart_current_limit_rpm": {
-          "parameter_id": 61,
-          "kind": "uint",
-          "value": 20000
-        },
-        "idle_mode": {
-          "parameter_id": 6,
-          "kind": "uint",
-          "value": 1
-        },
-        "forward_limit_enabled": {
-          "parameter_id": 52,
-          "kind": "uint",
-          "value": 0
-        },
-        "reverse_limit_enabled": {
-          "parameter_id": 53,
-          "kind": "uint",
-          "value": 0
-        }
-      },
-      "host_side_parameters": {
-        "motor_direction_sign": 1.0,
-        "static_friction_negative_V": 0.238,
-        "static_friction_positive_V": 0.314
-      }
-    },
-    "3": {
-      "role": "steer",
-      "spark_persistent_parameters": {
-        "control_type": {
-          "parameter_id": 5,
-          "kind": "uint",
-          "value": 1
-        },
-        "sensor_type": {
-          "parameter_id": 9,
-          "kind": "uint",
-          "value": 1
-        },
-        "slot0_kP": {
-          "parameter_id": 13,
-          "kind": "float",
-          "value": 0.0004
-        },
-        "slot0_kI": {
-          "parameter_id": 14,
-          "kind": "float",
-          "value": 0.0
-        },
-        "slot0_kD": {
-          "parameter_id": 15,
-          "kind": "float",
-          "value": 3e-05
-        },
-        "slot0_kV": {
-          "parameter_id": 16,
-          "kind": "float",
-          "value": 0.0022
-        },
-        "slot0_output_min": {
-          "parameter_id": 19,
-          "kind": "float",
-          "value": -0.25
-        },
-        "slot0_output_max": {
-          "parameter_id": 20,
-          "kind": "float",
-          "value": 0.25
-        },
-        "smart_current_stall_A": {
-          "parameter_id": 59,
-          "kind": "uint",
-          "value": 20
-        },
-        "smart_current_free_A": {
-          "parameter_id": 60,
-          "kind": "uint",
-          "value": 20
-        },
-        "smart_current_limit_rpm": {
-          "parameter_id": 61,
-          "kind": "uint",
-          "value": 20000
-        },
-        "idle_mode": {
-          "parameter_id": 6,
-          "kind": "uint",
-          "value": 1
-        },
-        "forward_limit_enabled": {
-          "parameter_id": 52,
-          "kind": "uint",
-          "value": 0
-        },
-        "reverse_limit_enabled": {
-          "parameter_id": 53,
-          "kind": "uint",
-          "value": 0
-        }
-      },
-      "host_side_parameters": {
-        "absolute_encoder_forward_offset_turns": 0.602722,
-        "static_friction_feedforward_V": 0.12,
-        "static_friction_full_rpm": 10.0
-      }
-    },
-    "4": {
-      "role": "drive",
-      "spark_persistent_parameters": {
-        "control_type": {
-          "parameter_id": 5,
-          "kind": "uint",
-          "value": 1
-        },
-        "sensor_type": {
-          "parameter_id": 9,
-          "kind": "uint",
-          "value": 1
-        },
-        "slot0_kP": {
-          "parameter_id": 13,
-          "kind": "float",
-          "value": 0.0003
-        },
-        "slot0_kI": {
-          "parameter_id": 14,
-          "kind": "float",
-          "value": 0.0
-        },
-        "slot0_kD": {
-          "parameter_id": 15,
-          "kind": "float",
-          "value": 0.0
-        },
-        "slot0_kV": {
-          "parameter_id": 16,
-          "kind": "float",
-          "value": 0.0022
-        },
-        "slot0_output_min": {
-          "parameter_id": 19,
-          "kind": "float",
-          "value": -0.25
-        },
-        "slot0_output_max": {
-          "parameter_id": 20,
-          "kind": "float",
-          "value": 0.25
-        },
-        "smart_current_stall_A": {
-          "parameter_id": 59,
-          "kind": "uint",
-          "value": 10
-        },
-        "smart_current_free_A": {
-          "parameter_id": 60,
-          "kind": "uint",
-          "value": 10
+          "value": 15
         },
         "smart_current_limit_rpm": {
           "parameter_id": 61,
@@ -319,11 +159,11 @@
       },
       "host_side_parameters": {
         "motor_direction_sign": -1.0,
-        "static_friction_negative_V": 0.082,
-        "static_friction_positive_V": 0.082
+        "static_friction_negative_V": 0.162,
+        "static_friction_positive_V": 0.186
       }
     },
-    "5": {
+    "3": {
       "role": "steer",
       "spark_persistent_parameters": {
         "control_type": {
@@ -339,7 +179,7 @@
         "slot0_kP": {
           "parameter_id": 13,
           "kind": "float",
-          "value": 0.0004
+          "value": 0.0006
         },
         "slot0_kI": {
           "parameter_id": 14,
@@ -359,12 +199,12 @@
         "slot0_output_min": {
           "parameter_id": 19,
           "kind": "float",
-          "value": -0.25
+          "value": -0.35
         },
         "slot0_output_max": {
           "parameter_id": 20,
           "kind": "float",
-          "value": 0.25
+          "value": 0.35
         },
         "smart_current_stall_A": {
           "parameter_id": 59,
@@ -398,7 +238,167 @@
         }
       },
       "host_side_parameters": {
-        "absolute_encoder_forward_offset_turns": 0.822707,
+        "absolute_encoder_forward_offset_turns": 0.12725,
+        "static_friction_feedforward_V": 0.12,
+        "static_friction_full_rpm": 10.0
+      }
+    },
+    "4": {
+      "role": "drive",
+      "spark_persistent_parameters": {
+        "control_type": {
+          "parameter_id": 5,
+          "kind": "uint",
+          "value": 1
+        },
+        "sensor_type": {
+          "parameter_id": 9,
+          "kind": "uint",
+          "value": 1
+        },
+        "slot0_kP": {
+          "parameter_id": 13,
+          "kind": "float",
+          "value": 0.0005
+        },
+        "slot0_kI": {
+          "parameter_id": 14,
+          "kind": "float",
+          "value": 0.0
+        },
+        "slot0_kD": {
+          "parameter_id": 15,
+          "kind": "float",
+          "value": 0.0
+        },
+        "slot0_kV": {
+          "parameter_id": 16,
+          "kind": "float",
+          "value": 0.0022
+        },
+        "slot0_output_min": {
+          "parameter_id": 19,
+          "kind": "float",
+          "value": -0.35
+        },
+        "slot0_output_max": {
+          "parameter_id": 20,
+          "kind": "float",
+          "value": 0.35
+        },
+        "smart_current_stall_A": {
+          "parameter_id": 59,
+          "kind": "uint",
+          "value": 15
+        },
+        "smart_current_free_A": {
+          "parameter_id": 60,
+          "kind": "uint",
+          "value": 15
+        },
+        "smart_current_limit_rpm": {
+          "parameter_id": 61,
+          "kind": "uint",
+          "value": 20000
+        },
+        "idle_mode": {
+          "parameter_id": 6,
+          "kind": "uint",
+          "value": 1
+        },
+        "forward_limit_enabled": {
+          "parameter_id": 52,
+          "kind": "uint",
+          "value": 0
+        },
+        "reverse_limit_enabled": {
+          "parameter_id": 53,
+          "kind": "uint",
+          "value": 0
+        }
+      },
+      "host_side_parameters": {
+        "motor_direction_sign": 1.0,
+        "static_friction_negative_V": 0.09,
+        "static_friction_positive_V": 0.082
+      }
+    },
+    "5": {
+      "role": "steer",
+      "spark_persistent_parameters": {
+        "control_type": {
+          "parameter_id": 5,
+          "kind": "uint",
+          "value": 1
+        },
+        "sensor_type": {
+          "parameter_id": 9,
+          "kind": "uint",
+          "value": 1
+        },
+        "slot0_kP": {
+          "parameter_id": 13,
+          "kind": "float",
+          "value": 0.0006
+        },
+        "slot0_kI": {
+          "parameter_id": 14,
+          "kind": "float",
+          "value": 0.0
+        },
+        "slot0_kD": {
+          "parameter_id": 15,
+          "kind": "float",
+          "value": 3e-05
+        },
+        "slot0_kV": {
+          "parameter_id": 16,
+          "kind": "float",
+          "value": 0.0022
+        },
+        "slot0_output_min": {
+          "parameter_id": 19,
+          "kind": "float",
+          "value": -0.35
+        },
+        "slot0_output_max": {
+          "parameter_id": 20,
+          "kind": "float",
+          "value": 0.35
+        },
+        "smart_current_stall_A": {
+          "parameter_id": 59,
+          "kind": "uint",
+          "value": 20
+        },
+        "smart_current_free_A": {
+          "parameter_id": 60,
+          "kind": "uint",
+          "value": 20
+        },
+        "smart_current_limit_rpm": {
+          "parameter_id": 61,
+          "kind": "uint",
+          "value": 20000
+        },
+        "idle_mode": {
+          "parameter_id": 6,
+          "kind": "uint",
+          "value": 1
+        },
+        "forward_limit_enabled": {
+          "parameter_id": 52,
+          "kind": "uint",
+          "value": 0
+        },
+        "reverse_limit_enabled": {
+          "parameter_id": 53,
+          "kind": "uint",
+          "value": 0
+        }
+      },
+      "host_side_parameters": {
+        "absolute_encoder_forward_offset_turns": 0.29915,
         "static_friction_feedforward_V": 0.21,
         "static_friction_full_rpm": 10.0
       }
@@ -419,7 +419,7 @@
         "slot0_kP": {
           "parameter_id": 13,
           "kind": "float",
-          "value": 0.0003
+          "value": 0.0005
         },
         "slot0_kI": {
           "parameter_id": 14,
@@ -439,22 +439,22 @@
         "slot0_output_min": {
           "parameter_id": 19,
           "kind": "float",
-          "value": -0.25
+          "value": -0.35
         },
         "slot0_output_max": {
           "parameter_id": 20,
           "kind": "float",
-          "value": 0.25
+          "value": 0.35
         },
         "smart_current_stall_A": {
           "parameter_id": 59,
           "kind": "uint",
-          "value": 10
+          "value": 15
         },
         "smart_current_free_A": {
           "parameter_id": 60,
           "kind": "uint",
-          "value": 10
+          "value": 15
         },
         "smart_current_limit_rpm": {
           "parameter_id": 61,
@@ -478,9 +478,9 @@
         }
       },
       "host_side_parameters": {
-        "motor_direction_sign": 1.0,
-        "static_friction_negative_V": 0.103,
-        "static_friction_positive_V": 0.103
+        "motor_direction_sign": -1.0,
+        "static_friction_negative_V": 0.12,
+        "static_friction_positive_V": 0.12
       }
     },
     "7": {
@@ -499,7 +499,7 @@
         "slot0_kP": {
           "parameter_id": 13,
           "kind": "float",
-          "value": 0.0004
+          "value": 0.0006
         },
         "slot0_kI": {
           "parameter_id": 14,
@@ -519,12 +519,12 @@
         "slot0_output_min": {
           "parameter_id": 19,
           "kind": "float",
-          "value": -0.25
+          "value": -0.35
         },
         "slot0_output_max": {
           "parameter_id": 20,
           "kind": "float",
-          "value": 0.25
+          "value": 0.35
         },
         "smart_current_stall_A": {
           "parameter_id": 59,
@@ -558,7 +558,7 @@
         }
       },
       "host_side_parameters": {
-        "absolute_encoder_forward_offset_turns": 0.182538,
+        "absolute_encoder_forward_offset_turns": 0.16469,
         "static_friction_feedforward_V": 0.15,
         "static_friction_full_rpm": 10.0
       }
@@ -579,7 +579,7 @@
         "slot0_kP": {
           "parameter_id": 13,
           "kind": "float",
-          "value": 0.0003
+          "value": 0.0005
         },
         "slot0_kI": {
           "parameter_id": 14,
@@ -599,22 +599,22 @@
         "slot0_output_min": {
           "parameter_id": 19,
           "kind": "float",
-          "value": -0.25
+          "value": -0.35
         },
         "slot0_output_max": {
           "parameter_id": 20,
           "kind": "float",
-          "value": 0.25
+          "value": 0.35
         },
         "smart_current_stall_A": {
           "parameter_id": 59,
           "kind": "uint",
-          "value": 10
+          "value": 15
         },
         "smart_current_free_A": {
           "parameter_id": 60,
           "kind": "uint",
-          "value": 10
+          "value": 15
         },
         "smart_current_limit_rpm": {
           "parameter_id": 61,
@@ -639,10 +639,10 @@
       },
       "host_side_parameters": {
         "motor_direction_sign": 1.0,
-        "static_friction_negative_V": 0.168,
-        "static_friction_positive_V": 0.242
+        "static_friction_negative_V": 0.105,
+        "static_friction_positive_V": 0.131
       }
     }
   },
-  "hardware_persisted_utc": "2026-10-01T04:40:31.233885+00:00"
+  "hardware_ram_applied_utc": "2026-10-01T19:26:04.141182+00:00"
 }

@@ -29,8 +29,8 @@ h_x, h_y = 0.190150 * np.array([1.0, 1.0, -1.0, -1.0]), 0.170150 * np.array([-1.
 # Thrifty analog on the steer SPARKs: turns, so 0 rad is wheel-forward.
 # anaV / 3.3 (Thrifty full scale). Filled from a live Status 3 read; 0 V is a valid angle, not a disconnect.
 ANALOG_FULL_V = 3.3
-# Measured 2026-09-30 on the chassis after reseating the ID 7 breakout,
-# wheels manually aligned forward, 3 s average.
+# Measured 2026-10-01 with all four wheels manually aligned forward,
+# using a 3 s average.
 
 # SPARK slot-0 velocity loop.
 # kP is duty cycle per RPM. kV is volts per RPM: the SPARK divides it by bus voltage.
@@ -48,8 +48,9 @@ MIN_SUPPLY_VOLTAGE = 11.5
 # steering command crosses zero.
 # (negative-RPM, positive-RPM) ground-load compensation in volts. Directional
 # values account for drivetrain friction and the reversed physical ID 4 motor.
-# Normalize drive motor shaft direction to the chassis convention. CAN ID 4 is
-# physically installed/wired opposite to IDs 2, 6, and 8.
+# Normalize drive motor shaft direction to the chassis convention. CAN IDs 4
+# and 8 are physically installed/wired opposite to IDs 2 and 6; the global
+# sign was verified from chassis motion on the ground.
 
 ################################################################################
 # Teleop and imitation learning

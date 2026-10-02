@@ -17,6 +17,7 @@ from spark_config_values import (
     SPARK_KI,
     SPARK_KP_DRIVE,
     SPARK_KP_STEER,
+    SPARK_KP_STEER_BY_ID,
     SPARK_KS_DRIVE,
     SPARK_KS_STEER,
     SPARK_KS_STEER_FULL_RPM,
@@ -68,7 +69,7 @@ def spark_parameters(device_id):
     return (
         (PARAM_CONTROL_TYPE, "uint", 1),
         (PARAM_SENSOR_TYPE, "uint", 1),
-        (PARAM_KP_0, "float", SPARK_KP_STEER if steer else SPARK_KP_DRIVE),
+        (PARAM_KP_0, "float", SPARK_KP_STEER_BY_ID[device_id] if steer else SPARK_KP_DRIVE),
         (PARAM_KI_0, "float", SPARK_KI),
         (PARAM_KD_0, "float", SPARK_KD_STEER if steer else SPARK_KD_DRIVE),
         (PARAM_KV_0, "float", SPARK_KV),
@@ -123,20 +124,31 @@ def main():
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--snapshot", default="spark_max_config.json")
     parser.add_argument("--write", action="store_true", help="write, verify, and persist all devices")
+    parser.add_argument("--ram-only", action="store_true", help="write and verify devices without persisting")
+    parser.add_argument("--ids", default="1,2,3,4,5,6,7,8", help="comma-separated SPARK device IDs")
     args = parser.parse_args()
 
+    if args.write and args.ram_only:
+        parser.error("--write and --ram-only are mutually exclusive")
+    device_ids = [int(value) for value in args.ids.split(",")]
+    if not device_ids or any(device_id not in range(1, 9) for device_id in device_ids):
+        parser.error("--ids must contain device IDs from 1 through 8")
+
     result = snapshot()
-    if args.write:
+    if args.write or args.ram_only:
         rack = SparkMaxRack.open(prefer="slcan", port=args.port)
         try:
-            for device_id in range(1, 9):
+            for device_id in device_ids:
                 for param_id, kind, value in spark_parameters(device_id):
                     rack.write_parameter(device_id, param_id, kind, value, timeout=0.20, attempts=12)
-                rack.persist_parameters(device_id, timeout=1.0, attempts=5)
-                print(f"SPARK {device_id}: parameters verified and persisted")
+                if args.write:
+                    rack.persist_parameters(device_id, timeout=1.0, attempts=5)
+                    print(f"SPARK {device_id}: parameters verified and persisted")
+                else:
+                    print(f"SPARK {device_id}: RAM parameters verified")
         finally:
             rack.stop()
-        result["hardware_persisted_utc"] = datetime.now(timezone.utc).isoformat()
+        result["hardware_persisted_utc" if args.write else "hardware_ram_applied_utc"] = datetime.now(timezone.utc).isoformat()
 
     destination = Path(args.snapshot)
     destination.write_text(json.dumps(result, indent=2) + "\n")

@@ -1,0 +1,25 @@
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+body{font-family:system-ui;margin:0;background:#111;color:#eee;text-align:center;touch-action:none}
+#status,#tagStatus{padding:8px;background:#333;min-height:22px}#tagStatus{background:#202020;color:#ffd54f}
+#cameraBox{width:min(92vw,520px);height:170px;margin:8px auto;position:relative;overflow:hidden;background:#000;border-radius:10px}
+#video,#overlay{position:absolute;width:100%;height:100%;left:0;top:0;object-fit:cover}#overlay{z-index:2}
+#startCamera{font-size:18px;padding:10px 18px;background:#1976d2;color:#fff;border:0;border-radius:10px;margin:5px}
+#pad{width:min(62vw,300px);height:min(62vw,300px);margin:7px auto;border-radius:50%;background:#262626;border:3px solid #777;position:relative}
+#knob{width:68px;height:68px;border-radius:50%;background:#42a5f5;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}
+button.turn{font-size:25px;padding:12px 30px;margin:3px;background:#555;color:white;border:0;border-radius:12px}.active{background:#d84315!important}
+details{font-size:14px;color:#bbb}input{width:75px;font-size:16px}small{display:block;padding:5px;color:#bbb}
+</style></head><body>
+<div id="status">连接中；松手即停</div><button id="startCamera">启动相机和 AprilTag</button>
+<div id="tagStatus">尚未启动相机</div><div id="cameraBox"><video id="video" playsinline muted></video><canvas id="overlay"></canvas></div>
+<div id="pad"><div id="knob"></div></div><button class="turn" id="left">↺</button><button class="turn" id="right">↻</button>
+<small>摇杆控制底盘；手机相对 AprilTag 的运动控制机械臂；按住时共同使能</small>
+<details><summary>标记与相机设置</summary>
+<label>黑色方框边长 mm <input id="tagSize" type="number" value="160" min="50" max="500"></label>
+<label>水平视场角 ° <input id="fov" type="number" value="64" min="35" max="100"></label>
+<div>使用 tag36h11，ID 0。视场角影响位置比例，正式运动前必须校准。</div></details>
+<canvas id="work" width="640" height="480" hidden></canvas>
+<script>window.TELEOP_TOKEN='__SESSION_TOKEN__'</script><script src="/static/apriltag/detector-manager.js"></script><script src="/static/apriltag/teleop.js"></script>
+</body></html>
