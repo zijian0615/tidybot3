@@ -89,6 +89,9 @@ DRIVE_READY_STEER_RPM = 15.0
 DRIVE_REVOKE_STEER_RPM = 35.0
 DRIVE_SETTLE_S = 0.25
 DRIVE_RAMP_UP_S = 0.40
+# Thumbs rarely push the joystick straight; snap directions this close to
+# forward/back/left/right onto the axis.
+AXIS_SNAP_RAD = math.radians(15.0)
 
 OFFSETS = dict(zip(STEER_IDS, ENCODER_MAGNET_OFFSETS))
 DRIVE_SIGN = DRIVE_MOTOR_SIGNS
@@ -207,6 +210,18 @@ def wrap(value):
     return (value + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def snap_to_axis(x, y):
+    magnitude = math.hypot(x, y)
+    if magnitude == 0.0:
+        return x, y
+    angle = math.atan2(y, x)
+    axis = round(angle / (math.pi / 2.0)) * (math.pi / 2.0)
+    if abs(wrap(angle - axis)) > AXIS_SNAP_RAD:
+        return x, y
+    magnitude = min(1.0, magnitude)
+    return round(magnitude * math.cos(axis), 9), round(magnitude * math.sin(axis), 9)
+
+
 class CommandState:
     def __init__(self):
         self.lock = threading.Lock()
@@ -223,6 +238,7 @@ class CommandState:
         x = clamp(float(data.get("x", 0.0)), -1.0, 1.0)
         y = clamp(float(data.get("y", 0.0)), -1.0, 1.0)
         rotation = clamp(float(data.get("rotation", 0.0)), -1.0, 1.0)
+        x, y = snap_to_axis(x, y)
         with self.lock:
             # HTTP requests may finish out of order because both the browser
             # and ThreadingHTTPServer allow concurrent requests. Never let an
