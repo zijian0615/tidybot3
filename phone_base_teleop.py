@@ -109,6 +109,30 @@ N_STEER = 32.0 / 15.0 * 60.0 / 10.0
 N_R1 = 50.0 / 14.0
 N_DRIVE = N_R1 * (19.0 / 25.0) * (45.0 / 15.0)
 
+# Powered-caster mode (--caster-mode). Drive while the casters steer instead
+# of waiting for alignment. Offsets match base_controller.py: the contact
+# point trails the steer axis.
+B_X = -0.014008
+B_Y = -0.003753
+# The kinematic steering law has gain |v|/|B_X| (~10 rad/s per rad at
+# 0.14 m/s); on this loop it shimmied at 5-7 Hz under 60 kg. Steer toward the
+# zero-scrub heading with a moderate closed-loop gain instead, and roll each
+# wheel at the chassis speed projected on its current heading.
+CASTER_CONTROL_PERIOD_S = 0.02
+CASTER_STEER_GAIN = 3.0  # rad/s per rad
+CASTER_STEER_DEADBAND_RAD = math.radians(2.5)
+CASTER_MAX_STEER_RATE = 1.5  # rad/s at the caster, 183 steer-motor RPM
+# Chassis speed fraction while a caster is 90 deg from its heading; a
+# misaligned caster is dragged sideways at |v| sin(error).
+CASTER_MIN_SPEED_SCALE = 0.25
+# Stay under the rack's 270 RPM clamp so no single motor is ever clipped.
+CASTER_MAX_MOTOR_RPM = 250.0
+# Stop if any motor misses its command by this much for this long; in caster
+# mode a motor that cannot follow is dragged or fought by the other casters.
+TRACK_MIN_RPM = 60.0
+TRACK_FRACTION = 0.5
+TRACK_TRIP_S = 0.5
+
 
 PAGE_BUTTON_CONTROL = r"""<!doctype html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
@@ -373,10 +397,83 @@ def csv_row(rack, targets, t, enabled, drive_ready, drive_scale, max_error, volt
     return row + [status]
 
 
-def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
+def caster_heading(idx, vx, vy, wz, current):
+    """Zero-scrub heading for one caster, or None when its steer axis is nearly still.
+
+    Of the trailing and leading solutions, take the one nearer the current
+    angle. Steering is closed-loop, so a leading caster holds, and reversing
+    does not swing every caster through 180 deg.
+    """
+    wheel_vx = vx - wz * H_Y[idx]
+    wheel_vy = vy + wz * H_X[idx]
+    speed = math.hypot(wheel_vx, wheel_vy)
+    if speed <= 0.005:
+        return None
+    heading = math.atan2(wheel_vy, wheel_vx)
+    # Rotation offsets the zero-scrub heading by asin(wz * B_X / speed).
+    offset = math.asin(clamp(wz * B_X / speed, -1.0, 1.0))
+    trailing = wrap(heading + offset)
+    leading = wrap(heading + math.pi - offset)
+    return trailing if abs(wrap(trailing - current)) <= abs(wrap(leading - current)) else leading
+
+
+def caster_step(rack, velocity, targets):
+    """Command all 8 motors for one control period; return (twist scale, max heading error).
+
+    The twist is scaled as a whole, never per motor: for caster alignment,
+    and so no drive command exceeds CASTER_MAX_MOTOR_RPM. The scaled twist is
+    written back to velocity so the acceleration limit ramps up from it.
+    """
+    angles = [angle_rad(i, rack.telemetry[i].analog_voltage) for i in STEER_IDS]
+    if not all(math.isfinite(a) for a in angles):
+        velocity[:] = (0.0, 0.0, 0.0)
+        for device in range(1, 9):
+            rack.set_velocity(device, 0.0)
+        return 0.0, math.pi
+    vx, vy, wz = velocity
+    steer_rates = []
+    max_error = 0.0
+    for idx, angle in enumerate(angles):
+        target = caster_heading(idx, vx, vy, wz, angle)
+        if target is not None:
+            targets[idx] = target
+        target = angle if targets[idx] is None else targets[idx]
+        error = wrap(target - angle)
+        max_error = max(max_error, abs(error))
+        if abs(error) <= CASTER_STEER_DEADBAND_RAD:
+            steer_rates.append(0.0)
+        else:
+            active_error = error - math.copysign(CASTER_STEER_DEADBAND_RAD, error)
+            steer_rates.append(clamp(CASTER_STEER_GAIN * active_error, -CASTER_MAX_STEER_RATE, CASTER_MAX_STEER_RATE))
+
+    scale = CASTER_MIN_SPEED_SCALE + (1.0 - CASTER_MIN_SPEED_SCALE) * max(0.0, math.cos(max_error))
+    # Drive motor RPM = fixed (from steer rate) + scale * per_scale (twist).
+    to_rpm = 60.0 / (2.0 * math.pi)
+    drives = []
+    for idx, (drive_id, angle, steer_rate) in enumerate(zip(DRIVE_IDS, angles, steer_rates)):
+        s, c = math.sin(angle), math.cos(angle)
+        sign = DRIVE_SIGN[drive_id]
+        # Steer-axis velocity on the wheel heading; the contact point sits
+        # B_Y beside the axis, so caster rotation adds -B_Y * (wz + steer_rate).
+        rolling = (c * (vx - wz * H_Y[idx]) + s * (vy + wz * H_X[idx]) - wz * B_Y) / RADIUS_M
+        # The gear coupling is not sign-flipped; see drive_motor_rpm().
+        fixed = (N_R1 * steer_rate + sign * N_DRIVE * steer_rate * B_Y / RADIUS_M) * to_rpm
+        per_scale = -sign * N_DRIVE * rolling * to_rpm
+        drives.append((fixed, per_scale))
+        if abs(per_scale) > 0.0:
+            scale = min(scale, max(0.0, CASTER_MAX_MOTOR_RPM - abs(fixed)) / abs(per_scale))
+    velocity[:] = (scale * vx, scale * vy, scale * wz)
+    for (steer_id, drive_id), steer_rate, (fixed, per_scale) in zip(zip(STEER_IDS, DRIVE_IDS), steer_rates, drives):
+        rack.set_velocity(steer_id, N_STEER * steer_rate * to_rpm)
+        rack.set_velocity(drive_id, fixed + scale * per_scale)
+    return scale, max_error
+
+
+def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_mode=False):
     if diagnostics:
         print(f"Phone steering compensation (V): { {i: KS[i] for i in STEER_IDS} }", flush=True)
-    rack = SparkMaxRack.open(prefer="slcan", port=port, period_s=CONTROL_PERIOD_S,
+    period = CASTER_CONTROL_PERIOD_S if caster_mode else CONTROL_PERIOD_S
+    rack = SparkMaxRack.open(prefer="slcan", port=port, period_s=period,
                             max_rpm=270.0, ks_volts=KS, ks_full_rpm=KS_FULL_RPM)
     armed = False
     velocity = [0.0, 0.0, 0.0]
@@ -388,6 +485,10 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
     voltage_recover_since = None
     voltage_fault_latched = False
     last_diagnostics = 0.0
+    tracking_fault = None
+    track_bad_since = {}
+    if caster_mode:
+        print(f"Base control: powered-caster mode (steer while driving), {1.0 / CASTER_CONTROL_PERIOD_S:.0f} Hz", flush=True)
     log_file = log_writer = None
     if log_csv:
         log_file = open(log_csv, "w", newline="")
@@ -418,7 +519,8 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
             now = time.monotonic()
             with state.lock:
                 fresh = now - state.last_rx <= COMMAND_TIMEOUT_S
-                enabled = state.enabled and fresh
+                operator_enabled = state.enabled
+                enabled = operator_enabled and fresh
                 requested = state.command if enabled else (0.0, 0.0, 0.0)
             healthy = all(math.isfinite(t.last_rx_s) and now - t.last_rx_s <= 0.25 for t in rack.telemetry.values())
             voltage = min((t.voltage for t in rack.telemetry.values() if math.isfinite(t.voltage)), default=0.0)
@@ -447,6 +549,22 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
                 else:
                     low_voltage_since = None
 
+            # Caster mode: latch a stop when a motor cannot follow its command.
+            # Cleared only after the operator releases the control.
+            if not operator_enabled:
+                tracking_fault = None
+            if not (caster_mode and armed):
+                track_bad_since.clear()
+            elif tracking_fault is None:
+                for device, target in zip(rack.device_ids, rack.get_rpms()):
+                    actual = rack.telemetry[device].velocity_rpm
+                    if abs(actual - target) > max(TRACK_MIN_RPM, TRACK_FRACTION * abs(target)):
+                        since = track_bad_since.setdefault(device, now)
+                        if now - since >= TRACK_TRIP_S:
+                            tracking_fault = f"motor {device} target={target:.0f} actual={actual:.0f} RPM"
+                    else:
+                        track_bad_since.pop(device, None)
+
             if not healthy or faults:
                 enabled = False
                 requested = (0.0, 0.0, 0.0)
@@ -455,6 +573,10 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
                 enabled = False
                 requested = (0.0, 0.0, 0.0)
                 state.status = f"低电压保护 voltage={voltage:.1f} V，等待恢复到 {SUPPLY_RECOVER_V:.1f} V"
+            elif tracking_fault is not None:
+                enabled = False
+                requested = (0.0, 0.0, 0.0)
+                state.status = f"跟随误差停机 {tracking_fault}；松手后重试"
             elif not fresh:
                 state.status = "命令超时，已停机"
             elif not state.enabled:
@@ -462,7 +584,7 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
             else:
                 state.status = f"运行 {voltage:.1f} V"
 
-            limits = (MAX_TRANSLATION_ACCEL * CONTROL_PERIOD_S,) * 2 + (MAX_ROTATION_ACCEL * CONTROL_PERIOD_S,)
+            limits = (MAX_TRANSLATION_ACCEL * period,) * 2 + (MAX_ROTATION_ACCEL * period,)
             for i in range(3):
                 velocity[i] += clamp(requested[i] - velocity[i], -limits[i], limits[i])
             max_error = 0.0
@@ -477,6 +599,12 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
                 if armed:
                     rack.disarm()
                     armed = False
+            elif caster_mode:
+                drive_scale, max_error = caster_step(rack, velocity, targets)
+                drive_ready = True
+                if not armed:
+                    rack.arm()
+                    armed = True
             else:
                 vx, vy, wz = velocity
                 plans = []
@@ -543,7 +671,7 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
                     1.0,
                 )
                 if drive_ready:
-                    drive_ramp = min(1.0, drive_ramp + CONTROL_PERIOD_S / DRIVE_RAMP_UP_S)
+                    drive_ramp = min(1.0, drive_ramp + period / DRIVE_RAMP_UP_S)
                 else:
                     drive_ramp = 0.0
                 drive_scale = alignment_scale * drive_ramp
@@ -566,7 +694,7 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
             if diagnostics and now - last_diagnostics >= 1.0:
                 print_diagnostics(rack, targets, enabled, state.status)
                 last_diagnostics = now
-            time.sleep(max(0.0, CONTROL_PERIOD_S - (time.monotonic() - started)))
+            time.sleep(max(0.0, period - (time.monotonic() - started)))
     finally:
         rack.disarm()
         rack.stop()
@@ -574,9 +702,9 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
             log_file.close()
 
 
-def guarded_motor_loop(state, port, configure, diagnostics=False, log_csv=None):
+def guarded_motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_mode=False):
     try:
-        motor_loop(state, port, configure, diagnostics, log_csv)
+        motor_loop(state, port, configure, diagnostics, log_csv, caster_mode)
     except Exception as exc:
         with state.lock:
             state.enabled = False
@@ -614,7 +742,8 @@ def main():
     parser.add_argument("--tls-key", help="HTTPS private key")
     parser.add_argument("--configure-sparks", action="store_true")
     parser.add_argument("--diagnostics", action="store_true", help="Print caster angles and motor target/actual RPM once per second")
-    parser.add_argument("--log-csv", help="Write per-control-period base telemetry (20 Hz) to this CSV file")
+    parser.add_argument("--log-csv", help="Write per-control-period base telemetry (20 Hz; 50 Hz with --caster-mode) to this CSV file")
+    parser.add_argument("--caster-mode", action="store_true", help="Powered-caster control: steer while driving instead of aligning first")
     args = parser.parse_args()
     state = CommandState()
     arm_state = XArmCommandState()
@@ -640,7 +769,7 @@ def main():
     if args.enable_motors:
         motor_thread = threading.Thread(
             target=guarded_motor_loop,
-            args=(state, args.can_port, args.configure_sparks, args.diagnostics, args.log_csv),
+            args=(state, args.can_port, args.configure_sparks, args.diagnostics, args.log_csv, args.caster_mode),
             daemon=True,
         )
         motor_thread.start()
