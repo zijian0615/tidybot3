@@ -8,13 +8,14 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 
 CONTROL_PERIOD_S = 0.05
 COMMAND_TIMEOUT_S = 0.30
 CONTROLLER_COMMAND_DURATION_S = 0.08
-TRANSLATION_SPEED_MM_S = 100.0
-ROTATION_SPEED_DEG_S = 30.0
+TRANSLATION_SPEED_MM_S = 180.0
+ROTATION_SPEED_DEG_S = 55.0
 PHONE_FULL_TRANSLATION_M = 0.10
 PHONE_FULL_ROTATION_DEG = 20.0
 DEVICE_CAMERA_OFFSET = (0.0, 0.02, -0.04)
@@ -30,8 +31,8 @@ VISION_MAX_MEASURED_ANGULAR_DEG_S = 90.0
 VISION_VELOCITY_FILTER_ALPHA = 0.22
 VISION_IDLE_DECAY = 0.35
 VISION_ANGULAR_IDLE_DECAY = 0.10
-TRANSLATION_ACCEL_MM_S2 = 300.0
-ROTATION_ACCEL_DEG_S2 = 90.0
+TRANSLATION_ACCEL_MM_S2 = 350.0
+ROTATION_ACCEL_DEG_S2 = 100.0
 WRIST_SOFT_LIMIT_DEG = 330.0
 WRIST_STOP_LIMIT_DEG = 350.0
 WRIST_LIMIT_JOINT_INDICES = (3, 5)  # J4 and J6
@@ -124,17 +125,26 @@ def load_xarm_api():
         from xarm.wrapper import XArmAPI
         return XArmAPI
     except ImportError:
-        # Development fallback used by this checkout's initial hardware test.
-        sdk_path = "/tmp/xarm-python-sdk"
-        if sdk_path not in sys.path:
-            sys.path.insert(0, sdk_path)
-        try:
-            from xarm.wrapper import XArmAPI
-            return XArmAPI
-        except ImportError as exc:
-            raise RuntimeError(
-                "xArm SDK missing; install xarm-python-sdk or clone the official SDK to /tmp/xarm-python-sdk"
-            ) from exc
+        # Prefer the persistent vendored checkout.  Keep the /tmp path as a
+        # compatibility fallback for older robot images.
+        candidates = (
+            Path(__file__).resolve().parent / ".vendor" / "xarm-python-sdk",
+            Path("/tmp/xarm-python-sdk"),
+        )
+        for sdk_path in candidates:
+            if not sdk_path.is_dir():
+                continue
+            path_text = str(sdk_path)
+            if path_text not in sys.path:
+                sys.path.insert(0, path_text)
+            try:
+                from xarm.wrapper import XArmAPI
+                return XArmAPI
+            except ImportError:
+                continue
+        raise RuntimeError(
+            "xArm SDK missing; run configure_xarm_sdk.sh or install xarm-python-sdk"
+        )
 
 
 class CommandState:
@@ -396,7 +406,7 @@ def handler_factory(state, motion_enabled, session_token):
 
 
 def scaled_velocity(command):
-    return [
+    velocity = [
         command[0] * TRANSLATION_SPEED_MM_S,
         command[1] * TRANSLATION_SPEED_MM_S,
         command[2] * TRANSLATION_SPEED_MM_S,
@@ -404,6 +414,14 @@ def scaled_velocity(command):
         command[4] * ROTATION_SPEED_DEG_S,
         command[5] * ROTATION_SPEED_DEG_S,
     ]
+    for start, maximum in ((0, TRANSLATION_SPEED_MM_S), (3, ROTATION_SPEED_DEG_S)):
+        magnitude = math.sqrt(sum(value * value for value in velocity[start:start + 3]))
+        if magnitude > maximum:
+            scale = maximum / magnitude
+            velocity[start:start + 3] = [
+                value * scale for value in velocity[start:start + 3]
+            ]
+    return velocity
 
 
 def dot_product(a, b):
