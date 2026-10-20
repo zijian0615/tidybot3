@@ -296,6 +296,17 @@ def handler_factory(state, arm_state, dry_run, arm_enabled, session_token, pose_
     return Handler
 
 
+def drive_motor_rpm(drive_id, steer_rate, wheel_rate):
+    """Drive motor RPM for a caster steer rate and wheel rate (both rad/s).
+
+    DRIVE_SIGN flips wheel rolling only. The steer-to-drive gear coupling has
+    the same sign on every caster: with the chassis still, all four drive
+    motors measured +0.1 to +0.27 RPM per steer-motor RPM (logs 2026-10-20),
+    while sign-flipping it made IDs 2 and 6 fight the ground.
+    """
+    return (N_R1 * steer_rate - DRIVE_SIGN[drive_id] * N_DRIVE * wheel_rate) * 60.0 / (2.0 * math.pi)
+
+
 def angle_rad(device, voltage):
     return wrap((voltage / 3.3 - OFFSETS[device]) * 2.0 * math.pi)
 
@@ -540,7 +551,7 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
                 for steer_id, drive_id, steer_rate, speed, _ in plans:
                     steer_rpm = N_STEER * steer_rate * 60.0 / (2.0 * math.pi)
                     wheel_rate = drive_scale * speed / RADIUS_M
-                    drive_rpm = DRIVE_SIGN[drive_id] * (N_R1 * steer_rate - N_DRIVE * wheel_rate) * 60.0 / (2.0 * math.pi)
+                    drive_rpm = drive_motor_rpm(drive_id, steer_rate, wheel_rate)
                     rack.set_velocity(steer_id, steer_rpm)
                     rack.set_velocity(drive_id, drive_rpm)
                 if not armed:

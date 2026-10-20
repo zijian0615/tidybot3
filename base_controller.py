@@ -127,24 +127,27 @@ class Caster:
             return 0.0
         return TWO_PI * (voltage / ANALOG_FULL_V - self.encoder_offset)
 
+    # drive_motor_sign flips wheel rolling only. The steer-to-drive gear
+    # coupling (N_r1 * steer) has the same sign on every caster; see
+    # drive_motor_rpm() in phone_base_teleop.py.
     def get_positions(self):
         steer_motor_pos = self.steer_motor.get_position()
-        drive_motor_pos = self.drive_motor_sign * self.drive_motor.get_position()
+        drive_motor_pos = self.drive_motor.get_position()
         steer_pos = self.get_steer_position()
-        drive_pos = steer_motor_pos / N_s_r2_w - drive_motor_pos / N_r1_r2_w
+        drive_pos = self.drive_motor_sign * (steer_motor_pos / N_s_r2_w - drive_motor_pos / N_r1_r2_w)
         return steer_pos, drive_pos
 
     def get_velocities(self):
         steer_motor_vel = self.steer_motor.get_velocity()
-        drive_motor_vel = self.drive_motor_sign * self.drive_motor.get_velocity()
+        drive_motor_vel = self.drive_motor.get_velocity()
         steer_vel = steer_motor_vel / N_s
-        drive_vel = steer_motor_vel / N_s_r2_w - drive_motor_vel / N_r1_r2_w
+        drive_vel = self.drive_motor_sign * (steer_motor_vel / N_s_r2_w - drive_motor_vel / N_r1_r2_w)
         return steer_vel, drive_vel
 
     def set_velocities(self, steer_vel, drive_vel):
         self.steer_motor.set_velocity(N_s * steer_vel)
-        drive_motor_vel = N_r1 * steer_vel - N_r1_r2_w * drive_vel
-        self.drive_motor.set_velocity(self.drive_motor_sign * drive_motor_vel)
+        drive_motor_vel = N_r1 * steer_vel - self.drive_motor_sign * N_r1_r2_w * drive_vel
+        self.drive_motor.set_velocity(drive_motor_vel)
 
     def set_neutral(self):
         self.steer_motor.set_neutral()
