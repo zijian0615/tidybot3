@@ -5,3 +5,4 @@ __pycache__
 *.swp
 phone_https/
 .vendor/
+logs/

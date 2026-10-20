@@ -7,6 +7,7 @@ opening CAN. Pass --enable-motors only after checking the UI and stop behavior.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import mimetypes
@@ -335,7 +336,33 @@ def print_diagnostics(rack, targets, enabled, status):
     print("\n".join(rows), flush=True)
 
 
-def motor_loop(state, port, configure, diagnostics=False):
+def csv_header():
+    cols = ["t_s", "enabled", "drive_ready", "drive_scale", "max_error_deg", "bus_v",
+            "req_vx", "req_vy", "req_wz", "vx", "vy", "wz"]
+    for idx in range(1, 5):
+        cols += [f"c{idx}_angle_deg", f"c{idx}_error_deg"]
+    for device in range(1, 9):
+        cols += [f"m{device}_target_rpm", f"m{device}_actual_rpm", f"m{device}_duty", f"m{device}_current_a"]
+    return cols + ["status"]
+
+
+def csv_row(rack, targets, t, enabled, drive_ready, drive_scale, max_error, voltage, requested, velocity, status):
+    """One control-period sample, same quantities as print_diagnostics."""
+    row = [f"{t:.3f}", int(enabled), int(drive_ready), f"{drive_scale:.3f}",
+           f"{math.degrees(max_error):.2f}", f"{voltage:.2f}"]
+    row += [f"{v:.4f}" for v in (*requested, *velocity)]
+    for idx, steer_id in enumerate(STEER_IDS):
+        current = angle_rad(steer_id, rack.telemetry[steer_id].analog_voltage)
+        error = math.nan if targets[idx] is None else math.degrees(wrap(targets[idx] - current))
+        row += [f"{math.degrees(current):.2f}", f"{error:.2f}"]
+    rpms = dict(zip(rack.device_ids, rack.get_rpms()))
+    for device in range(1, 9):
+        tel = rack.telemetry[device]
+        row += [f"{rpms[device]:.1f}", f"{tel.velocity_rpm:.1f}", f"{tel.applied:.4f}", f"{tel.current:.2f}"]
+    return row + [status]
+
+
+def motor_loop(state, port, configure, diagnostics=False, log_csv=None):
     if diagnostics:
         print(f"Phone steering compensation (V): { {i: KS[i] for i in STEER_IDS} }", flush=True)
     rack = SparkMaxRack.open(prefer="slcan", port=port, period_s=CONTROL_PERIOD_S,
@@ -350,6 +377,13 @@ def motor_loop(state, port, configure, diagnostics=False):
     voltage_recover_since = None
     voltage_fault_latched = False
     last_diagnostics = 0.0
+    log_file = log_writer = None
+    if log_csv:
+        log_file = open(log_csv, "w", newline="")
+        log_writer = csv.writer(log_file)
+        log_writer.writerow(csv_header())
+        print(f"Logging base telemetry to {log_csv}", flush=True)
+    log_t0 = time.monotonic()
     try:
         if configure:
             state.status = "正在配置 SPARK，保持松手"
@@ -420,6 +454,8 @@ def motor_loop(state, port, configure, diagnostics=False):
             limits = (MAX_TRANSLATION_ACCEL * CONTROL_PERIOD_S,) * 2 + (MAX_ROTATION_ACCEL * CONTROL_PERIOD_S,)
             for i in range(3):
                 velocity[i] += clamp(requested[i] - velocity[i], -limits[i], limits[i])
+            max_error = 0.0
+            drive_scale = 0.0
             if not enabled:
                 velocity[:] = (0.0, 0.0, 0.0)
                 drive_ready = False
@@ -510,6 +546,12 @@ def motor_loop(state, port, configure, diagnostics=False):
                 if not armed:
                     rack.arm()
                     armed = True
+            if log_writer is not None:
+                log_writer.writerow(csv_row(
+                    rack, targets, now - log_t0, enabled, drive_ready, drive_scale,
+                    max_error, voltage, requested, velocity, state.status,
+                ))
+                log_file.flush()
             if diagnostics and now - last_diagnostics >= 1.0:
                 print_diagnostics(rack, targets, enabled, state.status)
                 last_diagnostics = now
@@ -517,11 +559,13 @@ def motor_loop(state, port, configure, diagnostics=False):
     finally:
         rack.disarm()
         rack.stop()
+        if log_file is not None:
+            log_file.close()
 
 
-def guarded_motor_loop(state, port, configure, diagnostics=False):
+def guarded_motor_loop(state, port, configure, diagnostics=False, log_csv=None):
     try:
-        motor_loop(state, port, configure, diagnostics)
+        motor_loop(state, port, configure, diagnostics, log_csv)
     except Exception as exc:
         with state.lock:
             state.enabled = False
@@ -559,6 +603,7 @@ def main():
     parser.add_argument("--tls-key", help="HTTPS private key")
     parser.add_argument("--configure-sparks", action="store_true")
     parser.add_argument("--diagnostics", action="store_true", help="Print caster angles and motor target/actual RPM once per second")
+    parser.add_argument("--log-csv", help="Write per-control-period base telemetry (20 Hz) to this CSV file")
     args = parser.parse_args()
     state = CommandState()
     arm_state = XArmCommandState()
@@ -584,7 +629,7 @@ def main():
     if args.enable_motors:
         motor_thread = threading.Thread(
             target=guarded_motor_loop,
-            args=(state, args.can_port, args.configure_sparks, args.diagnostics),
+            args=(state, args.can_port, args.configure_sparks, args.diagnostics, args.log_csv),
             daemon=True,
         )
         motor_thread.start()
