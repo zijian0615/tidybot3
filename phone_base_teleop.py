@@ -89,6 +89,13 @@ DRIVE_READY_STEER_RPM = 15.0
 DRIVE_REVOKE_STEER_RPM = 35.0
 DRIVE_SETTLE_S = 0.25
 DRIVE_RAMP_UP_S = 0.40
+# Autonomous (ROS 2 / Nav2) velocity commands arrive over UDP on localhost
+# (--ros-bridge-port). They are capped below the phone limits and must keep
+# streaming; a held phone pad always overrides them, so holding the pad at its
+# center is an emergency stop.
+AUTO_MAX_TRANSLATION_MPS = 0.10
+AUTO_MAX_ROTATION_RAD_S = 0.25
+AUTO_COMMAND_TIMEOUT_S = 0.30
 # Thumbs rarely push the joystick straight; snap directions this close to
 # forward/back/left/right onto the axis.
 AXIS_SNAP_RAD = math.radians(15.0)
@@ -231,6 +238,8 @@ class CommandState:
         self.last_seq = -1
         self.status = "等待手机命令"
         self.stop_requested = False
+        self.auto_command = (0.0, 0.0, 0.0)
+        self.auto_last_rx = 0.0
 
     def update(self, data):
         seq = int(data.get("seq", -1))
@@ -251,6 +260,41 @@ class CommandState:
             self.command = (y * MAX_TRANSLATION_MPS, -x * MAX_TRANSLATION_MPS, rotation * MAX_ROTATION_RAD_S)
             self.last_rx = time.monotonic()
             return True
+
+    def update_auto(self, data):
+        """Chassis twist (m/s, m/s, rad/s) from the ROS bridge, clamped to the autonomous limits."""
+        vx, vy, wz = (float(data.get(k, 0.0)) for k in ("vx", "vy", "wz"))
+        # Check before clamping: clamp() maps NaN to the upper limit.
+        if not all(math.isfinite(v) for v in (vx, vy, wz)):
+            vx = vy = wz = 0.0
+        vx = clamp(vx, -AUTO_MAX_TRANSLATION_MPS, AUTO_MAX_TRANSLATION_MPS)
+        vy = clamp(vy, -AUTO_MAX_TRANSLATION_MPS, AUTO_MAX_TRANSLATION_MPS)
+        wz = clamp(wz, -AUTO_MAX_ROTATION_RAD_S, AUTO_MAX_ROTATION_RAD_S)
+        speed = math.hypot(vx, vy)
+        if speed > AUTO_MAX_TRANSLATION_MPS:
+            vx, vy = vx * AUTO_MAX_TRANSLATION_MPS / speed, vy * AUTO_MAX_TRANSLATION_MPS / speed
+        with self.lock:
+            self.auto_command = (vx, vy, wz)
+            self.auto_last_rx = time.monotonic()
+
+
+def ros_bridge_loop(state, port):
+    """Receive JSON twists {"vx", "vy", "wz"} from the ROS 2 cmd_vel bridge on localhost only."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", port))
+    sock.settimeout(0.2)
+    print(f"ROS bridge: listening for autonomous commands on udp://127.0.0.1:{port}", flush=True)
+    try:
+        while not state.stop_requested:
+            try:
+                payload, _ = sock.recvfrom(1024)
+                state.update_auto(json.loads(payload))
+            except socket.timeout:
+                continue
+            except (ValueError, TypeError, AttributeError) as exc:
+                print(f"ROS bridge: ignored bad packet: {exc}", flush=True)
+    finally:
+        sock.close()
 
 
 def handler_factory(state, arm_state, dry_run, arm_enabled, session_token, pose_source):
@@ -503,6 +547,7 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_m
     last_diagnostics = 0.0
     tracking_fault = None
     track_bad_since = {}
+    auto_blocked = False
     if caster_mode:
         print(f"Base control: powered-caster mode (steer while driving), {1.0 / CASTER_CONTROL_PERIOD_S:.0f} Hz", flush=True)
     log_file = log_writer = None
@@ -536,8 +581,24 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_m
             with state.lock:
                 fresh = now - state.last_rx <= COMMAND_TIMEOUT_S
                 operator_enabled = state.enabled
-                enabled = operator_enabled and fresh
-                requested = state.command if enabled else (0.0, 0.0, 0.0)
+                phone_active = operator_enabled and fresh
+                # A held phone pad (even centered, i.e. zero) overrides autonomy,
+                # and keeps it blocked after release until the autonomous
+                # stream stops (goal cancelled or finished), so letting go of
+                # an emergency stop never resumes driving by itself.
+                auto_fresh = now - state.auto_last_rx <= AUTO_COMMAND_TIMEOUT_S
+                if not auto_fresh:
+                    auto_blocked = False
+                elif phone_active:
+                    auto_blocked = True
+                auto_active = auto_fresh and not phone_active and not auto_blocked
+                enabled = phone_active or auto_active
+                if phone_active:
+                    requested = state.command
+                elif auto_active:
+                    requested = state.auto_command
+                else:
+                    requested = (0.0, 0.0, 0.0)
             healthy = all(math.isfinite(t.last_rx_s) and now - t.last_rx_s <= 0.25 for t in rack.telemetry.values())
             voltage = min((t.voltage for t in rack.telemetry.values() if math.isfinite(t.voltage)), default=0.0)
             faults = {i: t.faults & ~(1 << 3) for i, t in rack.telemetry.items() if t.faults & ~(1 << 3)}
@@ -566,8 +627,9 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_m
                     low_voltage_since = None
 
             # Caster mode: latch a stop when a motor cannot follow its command.
-            # Cleared only after the operator releases the control.
-            if not operator_enabled:
+            # Cleared only after the operator releases the control and the
+            # autonomous command stream has stopped.
+            if not operator_enabled and not auto_active:
                 tracking_fault = None
             if not (caster_mode and armed):
                 track_bad_since.clear()
@@ -593,6 +655,10 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_m
                 enabled = False
                 requested = (0.0, 0.0, 0.0)
                 state.status = f"跟随误差停机 {tracking_fault}；松手后重试"
+            elif auto_active:
+                state.status = f"自动导航 {voltage:.1f} V；按住摇杆即可接管/急停"
+            elif auto_blocked and not phone_active:
+                state.status = "自动导航已被手机中止；取消当前导航目标后才会恢复"
             elif not fresh:
                 state.status = "命令超时，已停机"
             elif not state.enabled:
@@ -760,6 +826,7 @@ def main():
     parser.add_argument("--diagnostics", action="store_true", help="Print caster angles and motor target/actual RPM once per second")
     parser.add_argument("--log-csv", help="Write per-control-period base telemetry (20 Hz; 50 Hz with --caster-mode) to this CSV file")
     parser.add_argument("--caster-mode", action="store_true", help="Powered-caster control: steer while driving instead of aligning first")
+    parser.add_argument("--ros-bridge-port", type=int, help="Accept autonomous base twists from the ROS 2 cmd_vel bridge on this localhost UDP port")
     args = parser.parse_args()
     state = CommandState()
     arm_state = XArmCommandState()
@@ -782,6 +849,7 @@ def main():
     motor_thread = None
     arm_thread = None
     mobile_io_thread = None
+    ros_bridge_thread = None
     if args.enable_motors:
         motor_thread = threading.Thread(
             target=guarded_motor_loop,
@@ -801,6 +869,11 @@ def main():
             daemon=True,
         )
         mobile_io_thread.start()
+    if args.ros_bridge_port:
+        ros_bridge_thread = threading.Thread(
+            target=ros_bridge_loop, args=(state, args.ros_bridge_port), daemon=True
+        )
+        ros_bridge_thread.start()
     print(
         f"Phone robot teleop: {'https' if args.tls_cert else 'http'}://{local_ip()}:{args.port} "
         f"(base={'ENABLED' if args.enable_motors else 'DRY RUN'}, "
@@ -825,6 +898,8 @@ def main():
             arm_thread.join(timeout=3.0)
         if mobile_io_thread is not None:
             mobile_io_thread.join(timeout=2.0)
+        if ros_bridge_thread is not None:
+            ros_bridge_thread.join(timeout=1.0)
 
 
 if __name__ == "__main__":
