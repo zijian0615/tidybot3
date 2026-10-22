@@ -11,8 +11,8 @@ async function post(path,data){try{const r=await fetch(path,{method:'POST',heade
 function sendBase(){post('/cmd',{token,seq:++baseSeq,enabled:baseActive(),x,y,rotation:rot})}
 function stopArm(){post('/arm_tag_pose',{token,seq:++poseSeq,enabled:false,position:{x:0,y:0,z:0},orientation:{x:0,y:0,z:0,w:1}})}
 function stopBase(){held=false;x=0;y=0;rot=0;knob.style.left='50%';knob.style.top='50%';for(const id of ['left','right'])document.querySelector('#'+id).classList.remove('active');sendBase();if(!armHeld)stopArm()}
-pad.onpointerdown=e=>{held=true;pad.setPointerCapture(e.pointerId);setPad(e);sendBase()};pad.onpointermove=e=>{if(held)setPad(e)};pad.onpointerup=stopBase;pad.onpointercancel=stopBase;
-for(const [id,v] of [['left',1],['right',-1]]){const b=document.querySelector('#'+id);b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);rot=v;b.classList.add('active');sendBase()};b.onpointerup=b.onpointercancel=stopBase}
+pad.onpointerdown=e=>{held=true;pad.setPointerCapture(e.pointerId);setPad(e);sendBase()};pad.onpointermove=e=>{if(held)setPad(e)};function releasePad(){held=false;x=0;y=0;knob.style.left='50%';knob.style.top='50%';sendBase()}function releaseTurn(b,v){if(rot===v)rot=0;b.classList.remove('active');sendBase()}pad.onpointerup=releasePad;pad.onpointercancel=releasePad;
+for(const [id,v] of [['left',1],['right',-1]]){const b=document.querySelector('#'+id);b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);rot=v;b.classList.add('active');sendBase()};b.onpointerup=b.onpointercancel=()=>releaseTurn(b,v)}
 
 const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],norm=a=>Math.sqrt(dot(a,a)),scale=(a,s)=>a.map(v=>v*s),sub=(a,b)=>a.map((v,i)=>v-b[i]);
 const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
