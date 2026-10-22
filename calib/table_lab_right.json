@@ -1,0 +1,5 @@
+{
+ "table_z_armbase_mm": 292.0,
+ "fingertip_len_mm": 172.0,
+ "note": "Right-hand lab table (tape 73 cm). Hover test 2026-10-21 at flange (520,-160,492): predicted 20 mm gap, measured 28 mm -> table top 292 mm above the arm base in the frame where closed fingertips = flange z - 172 mm. Only valid for the base parked as in that test (floor flat, same table)."
+}

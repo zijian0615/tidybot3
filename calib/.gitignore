@@ -1,0 +1,7 @@
+# captured images and run logs (large / per-session)
+rear_cam_images*/
+handeye_images/
+scene*.jpg
+rear_cam_undistort_compare.jpg
+*.log
+.hover_release
