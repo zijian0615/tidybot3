@@ -6,3 +6,7 @@ __pycache__
 phone_https/
 .vendor/
 logs/
+# robot run logs
+base_*.csv
+teleop_status.log
+*_watch.log

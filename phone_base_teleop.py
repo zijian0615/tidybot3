@@ -12,6 +12,7 @@ import json
 import math
 import mimetypes
 from pathlib import Path
+import re
 import secrets
 import socket
 import ssl
@@ -142,6 +143,15 @@ CASTER_MAX_MOTOR_RPM = 250.0
 TRACK_MIN_RPM = 60.0
 TRACK_FRACTION = 0.5
 TRACK_TRIP_S = 0.5
+# Host-side drive integral (--drive-integral, caster mode). The SPARK drive loop
+# is P-only with a small kS, so at ~100 RPM some caster angles stall at 30-60 %
+# of target (in-place left turns on the lab floor, logs 2026-10-21) and trip the
+# tracking stop. While a drive motor runs below its target, add feedforward at
+# DRIVE_I_GAIN volts per RPM of shortfall per second, bled back when it runs
+# fast; reset below DRIVE_I_MIN_RPM, on a direction change and when disarmed.
+DRIVE_I_GAIN = 0.03
+DRIVE_I_MAX_V = 1.2
+DRIVE_I_MIN_RPM = 30.0
 
 
 PAGE_BUTTON_CONTROL = r"""<!doctype html>
@@ -161,7 +171,8 @@ button{font-size:25px;padding:16px 24px;margin:5px;background:#555;color:white;b
 <button data-axis="0" data-sign="1">X+</button><button data-axis="1" data-sign="1">Y+</button><button data-axis="2" data-sign="1">Z+</button>
 <button data-axis="0" data-sign="-1">X−</button><button data-axis="1" data-sign="-1">Y−</button><button data-axis="2" data-sign="-1">Z−</button>
 <div class="label">姿态</div><button data-axis="3" data-sign="1">RX+</button><button data-axis="4" data-sign="1">RY+</button><button data-axis="5" data-sign="1">RZ+</button>
-<button data-axis="3" data-sign="-1">RX−</button><button data-axis="4" data-sign="-1">RY−</button><button data-axis="5" data-sign="-1">RZ−</button></div><small>平移 20 mm/s　旋转 5°/s</small></section>
+<button data-axis="3" data-sign="-1">RX−</button><button data-axis="4" data-sign="-1">RY−</button><button data-axis="5" data-sign="-1">RZ−</button>
+<div class="label">夹爪 / 收纳（点一下）</div><button id="gripOpen" class="grip">张开</button><button id="armStow" class="grip">收纳</button><button id="gripClose" class="grip">闭合</button></div><small>平移约 45 mm/s　旋转约 14°/s；松手即停</small></section>
 <script>
 const token='__SESSION_TOKEN__',status=document.querySelector('#status'),pad=document.querySelector('#pad'),knob=document.querySelector('#knob');
 let mode='base',x=0,y=0,rot=0,held=false,lastOK=0,baseSeq=0,armSeq=0;const armActive=new Map();
@@ -171,11 +182,12 @@ pad.onpointerdown=e=>{held=true;pad.setPointerCapture(e.pointerId);setPad(e)};pa
 for(const [id,v] of [['left',1],['right',-1]]){const b=document.querySelector('#'+id);b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);rot=v;b.classList.add('active');sendBase()};b.onpointerup=b.onpointercancel=()=>{rot=0;b.classList.remove('active');sendBase()}}
 async function post(path,data){try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});if(r.ok){lastOK=Date.now();const d=await r.json();status.textContent=d.mode+' | '+d.state}}catch(e){status.textContent='连接丢失；机器人应已停止'}}
 function sendBase(){return post('/cmd',{token,seq:++baseSeq,enabled:mode==='base'&&(held||rot!==0),x,y,rotation:rot})}
-function armVector(){const v=[0,0,0,0,0,0];for(const a of armActive.values())v[a.axis]+=a.sign;return v.map(n=>Math.max(-1,Math.min(1,n)))}
+const ARM_SCALE=0.25;function armVector(){const v=[0,0,0,0,0,0];for(const a of armActive.values())v[a.axis]+=a.sign;return v.map(n=>ARM_SCALE*Math.max(-1,Math.min(1,n)))}
 function sendArm(){return post('/arm_cmd',{token,seq:++armSeq,enabled:mode==='arm'&&armActive.size>0,velocity:armVector()})}
 function releaseArm(e,b){armActive.delete(e.pointerId);b.classList.remove('active');sendArm()}
-for(const b of document.querySelectorAll('#armPanel button')){b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);armActive.set(e.pointerId,{axis:+b.dataset.axis,sign:+b.dataset.sign});b.classList.add('active');sendArm()};b.onpointerup=e=>releaseArm(e,b);b.onpointercancel=e=>releaseArm(e,b);b.onlostpointercapture=e=>releaseArm(e,b)}
-function stopArm(){armActive.clear();for(const b of document.querySelectorAll('#armPanel button'))b.classList.remove('active');sendArm()}
+document.querySelector('#gripOpen').onclick=()=>post('/gripper',{token,action:'open'});document.querySelector('#armStow').onclick=()=>post('/arm_stow',{token});document.querySelector('#gripClose').onclick=()=>post('/gripper',{token,action:'close'});
+for(const b of document.querySelectorAll('#armPanel button:not(.grip)')){b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);armActive.set(e.pointerId,{axis:+b.dataset.axis,sign:+b.dataset.sign});b.classList.add('active');sendArm()};b.onpointerup=e=>releaseArm(e,b);b.onpointercancel=e=>releaseArm(e,b);b.onlostpointercapture=e=>releaseArm(e,b)}
+function stopArm(){armActive.clear();for(const b of document.querySelectorAll('#armPanel button:not(.grip)'))b.classList.remove('active');sendArm()}
 function select(next){stopBase();stopArm();mode=next;document.querySelector('#basePanel').classList.toggle('hidden',mode!=='base');document.querySelector('#armPanel').classList.toggle('hidden',mode!=='arm');document.querySelector('#baseTab').classList.toggle('selected',mode==='base');document.querySelector('#armTab').classList.toggle('selected',mode==='arm')}
 document.querySelector('#baseTab').onclick=()=>select('base');document.querySelector('#armTab').onclick=()=>select('arm');
 setInterval(()=>{if(mode==='base')sendBase();else sendArm()},80);setInterval(()=>{if(Date.now()-lastOK>500)status.textContent='连接超时；机器人应已停止'},200);
@@ -186,8 +198,8 @@ function stopAll(){stopBase();stopArm()}document.addEventListener('visibilitycha
 # drives the base. Holding the pad (including at its center) is the shared
 # deadman, so both devices can be controlled at the same time.
 PAGE = r"""<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<style>body{font-family:system-ui;margin:0;background:#111;color:#eee;text-align:center;touch-action:none}#status,#xrStatus{padding:8px;background:#333}#xr,#armHold{font-size:18px;padding:12px 20px;margin:6px;color:white;border:0;border-radius:10px}#xr{background:#1976d2}#armHold{background:#8b1e1e}#pad{width:min(66vw,330px);height:min(66vw,330px);margin:7px auto;border-radius:50%;background:#262626;border:3px solid #777;position:relative}#knob{width:72px;height:72px;border-radius:50%;background:#42a5f5;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}button.turn{font-size:28px;padding:14px 32px;margin:5px;background:#555;color:white;border:0;border-radius:12px}.active{background:#d84315!important}small{display:block;padding:8px;color:#bbb}</style></head>
-<body><div id="status">XR Browser：底盘和机械臂可同时控制</div><button id="xr">启动 ARKit</button><button id="armHold" disabled>按住控制机械臂</button><div id="xrStatus">AR未启动</div><div id="pad"><div id="knob"></div></div><button class="turn" id="left">↺</button><button class="turn" id="right">↻</button><small>红色按钮：机械臂；摇杆：底盘；松手即停</small>
+<style>body{font-family:system-ui;margin:0;background:#111;color:#eee;text-align:center;touch-action:none}#status,#xrStatus{padding:8px;background:#333}#xr,#armHold{font-size:18px;padding:12px 20px;margin:6px;color:white;border:0;border-radius:10px}#xr{background:#1976d2}#armHold{background:#8b1e1e}#pad{width:min(66vw,330px);height:min(66vw,330px);margin:7px auto;border-radius:50%;background:#262626;border:3px solid #777;position:relative}#knob{width:72px;height:72px;border-radius:50%;background:#42a5f5;position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}button.turn{font-size:28px;padding:14px 32px;margin:5px;background:#555;color:white;border:0;border-radius:12px}.active{background:#d84315!important}small{display:block;padding:8px;color:#bbb}.grip{display:flex;justify-content:center;gap:10px;margin:2px}.grip button{font-size:17px;padding:10px 20px;background:#2e7d32;color:#fff;border:0;border-radius:10px}.grip button:active{background:#d84315}</style></head>
+<body><div id="status">XR Browser：底盘和机械臂可同时控制</div><button id="xr">启动 ARKit</button><button id="armHold" disabled>按住控制机械臂</button><div class="grip"><button id="gripOpen">张开夹爪</button><button id="armStow" style="background:#6a1b9a">收纳</button><button id="gripClose">闭合夹爪</button></div><div id="xrStatus">AR未启动</div><div id="pad"><div id="knob"></div></div><button class="turn" id="left">↺</button><button class="turn" id="right">↻</button><small>红色按钮：机械臂；摇杆：底盘；松手即停</small>
 <script>
 const token='__SESSION_TOKEN__',status=document.querySelector('#status'),xrStatus=document.querySelector('#xrStatus'),pad=document.querySelector('#pad'),knob=document.querySelector('#knob'),armHold=document.querySelector('#armHold');let x=0,y=0,rot=0,held=false,armHeld=false,lastOK=0,baseSeq=0,poseSeq=0,xrSession=null,xrRef=null,armSending=false,pendingArmPose=null;
 function baseActive(){return held||rot!==0}function setPad(e){const r=pad.getBoundingClientRect(),cx=r.left+r.width/2,cy=r.top+r.height/2;let dx=(e.clientX-cx)/(r.width*.4),dy=(e.clientY-cy)/(r.height*.4),m=Math.hypot(dx,dy);if(m>1){dx/=m;dy/=m}x=dx;y=-dy;knob.style.left=(50+dx*40)+'%';knob.style.top=(50+dy*40)+'%'}
@@ -202,6 +214,7 @@ async function startXR(){if(!navigator.xr){xrStatus.textContent='请使用 XR Br
 function onXRFrame(t,frame){if(!xrSession)return;xrSession.requestAnimationFrame(onXRFrame);const pose=frame.getViewerPose(xrRef);if(!pose)return;const p=pose.transform.inverse.position,q=pose.transform.inverse.orientation;queueArmPose({token,seq:++poseSeq,enabled:armHeld,position:{x:p.x,y:p.y,z:p.z},orientation:{x:q.x,y:q.y,z:q.z,w:q.w}})}
 armHold.onpointerdown=e=>{e.preventDefault();armHold.setPointerCapture(e.pointerId);armHeld=true;armHold.classList.add('active')};function releaseArm(){armHeld=false;armHold.classList.remove('active');stopArm()}armHold.onpointerup=releaseArm;armHold.onpointercancel=releaseArm;armHold.onlostpointercapture=releaseArm;
 document.querySelector('#xr').onclick=()=>startXR().catch(e=>xrStatus.textContent='AR启动失败: '+e);setInterval(sendBase,80);setInterval(()=>{if(Date.now()-lastOK>500)status.textContent='连接超时；机器人应已停止'},200);function stopAll(){armHeld=false;stopBase();stopArm()}document.addEventListener('visibilitychange',()=>{if(document.hidden)stopAll()});window.addEventListener('blur',stopAll);
+for(const[id,action]of[['gripOpen','open'],['gripClose','close']])document.querySelector('#'+id).onclick=()=>post('/gripper',{token,action});document.querySelector('#armStow').onclick=()=>post('/arm_stow',{token});
 </script></body></html>"""
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -303,7 +316,9 @@ def handler_factory(state, arm_state, dry_run, arm_enabled, session_token, pose_
 
         def do_GET(self):
             if self.path == "/":
-                if pose_source == "natural":
+                if pose_source == "buttons":
+                    page = PAGE_BUTTON_CONTROL
+                elif pose_source == "natural":
                     page = NATURAL_PAGE
                 elif pose_source == "apriltag":
                     page = APRILTAG_PAGE
@@ -340,7 +355,7 @@ def handler_factory(state, arm_state, dry_run, arm_enabled, session_token, pose_
             self.wfile.write(payload)
 
         def do_POST(self):
-            if self.path not in ("/cmd", "/arm_cmd", "/arm_pose", "/arm_tag_pose"):
+            if self.path not in ("/cmd", "/arm_cmd", "/arm_pose", "/arm_tag_pose", "/gripper", "/arm_stow"):
                 self.send_error(404)
                 return
             try:
@@ -356,6 +371,14 @@ def handler_factory(state, arm_state, dry_run, arm_enabled, session_token, pose_
                 elif self.path == "/arm_cmd":
                     arm_state.update(data)
                     mode = "XARM ENABLED" if arm_enabled else "XARM DISABLED"
+                    current_status = arm_state.status if arm_enabled else "启动时需要 --enable-xarm"
+                elif self.path == "/arm_stow":
+                    arm_state.request_stow()
+                    mode = "XARM STOW" if arm_enabled else "XARM DISABLED"
+                    current_status = arm_state.status if arm_enabled else "启动时需要 --enable-xarm"
+                elif self.path == "/gripper":
+                    arm_state.request_gripper(str(data.get("action", "")))
+                    mode = "XARM GRIPPER" if arm_enabled else "XARM DISABLED"
                     current_status = arm_state.status if arm_enabled else "启动时需要 --enable-xarm"
                 elif self.path == "/arm_pose":
                     arm_state.update_pose(data)
@@ -438,10 +461,11 @@ def csv_header():
         cols += [f"c{idx}_angle_deg", f"c{idx}_error_deg"]
     for device in range(1, 9):
         cols += [f"m{device}_target_rpm", f"m{device}_actual_rpm", f"m{device}_duty", f"m{device}_current_a"]
+    cols += [f"m{drive_id}_integral_v" for drive_id in DRIVE_IDS]
     return cols + ["status"]
 
 
-def csv_row(rack, targets, t, enabled, drive_ready, drive_scale, max_error, voltage, requested, velocity, status):
+def csv_row(rack, targets, t, enabled, drive_ready, drive_scale, max_error, voltage, requested, velocity, status, drive_i=None):
     """One control-period sample, same quantities as print_diagnostics."""
     row = [f"{t:.3f}", int(enabled), int(drive_ready), f"{drive_scale:.3f}",
            f"{math.degrees(max_error):.2f}", f"{voltage:.2f}"]
@@ -454,7 +478,27 @@ def csv_row(rack, targets, t, enabled, drive_ready, drive_scale, max_error, volt
     for device in range(1, 9):
         tel = rack.telemetry[device]
         row += [f"{rpms[device]:.1f}", f"{tel.velocity_rpm:.1f}", f"{tel.applied:.4f}", f"{tel.current:.2f}"]
+    for drive_id in DRIVE_IDS:
+        magnitude, direction = (drive_i or {}).get(drive_id, (0.0, 0.0))
+        row.append(f"{magnitude * direction:.3f}")
     return row + [status]
+
+
+def update_drive_integral(rack, drive_i, period):
+    """Advance the per-drive integral feedforward (volts, >= 0, along the target direction)."""
+    rpms = dict(zip(rack.device_ids, rack.get_rpms()))
+    for drive_id in DRIVE_IDS:
+        target = rpms[drive_id]
+        magnitude, direction = drive_i[drive_id]
+        sign = math.copysign(1.0, target)
+        if abs(target) < DRIVE_I_MIN_RPM or sign != direction:
+            magnitude = 0.0
+        else:
+            shortfall = sign * (target - rack.telemetry[drive_id].velocity_rpm)
+            if math.isfinite(shortfall):
+                magnitude = clamp(magnitude + DRIVE_I_GAIN * shortfall * period, 0.0, DRIVE_I_MAX_V)
+        drive_i[drive_id] = (magnitude, sign)
+        rack.set_extra_feedforward(drive_id, sign * magnitude)
 
 
 def caster_heading(idx, vx, vy, wz, current):
@@ -529,7 +573,7 @@ def caster_step(rack, velocity, targets):
     return scale, max_error
 
 
-def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_mode=False):
+def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_mode=False, drive_integral=False):
     if diagnostics:
         print(f"Phone steering compensation (V): { {i: KS[i] for i in STEER_IDS} }", flush=True)
     period = CASTER_CONTROL_PERIOD_S if caster_mode else CONTROL_PERIOD_S
@@ -548,6 +592,13 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_m
     tracking_fault = None
     track_bad_since = {}
     auto_blocked = False
+    last_status_kind = None
+    drive_i = {drive_id: (0.0, 0.0) for drive_id in DRIVE_IDS}  # (volts, direction)
+    if drive_integral:
+        if caster_mode:
+            print(f"Drive integral: {DRIVE_I_GAIN} V/(RPM*s), max {DRIVE_I_MAX_V} V, above {DRIVE_I_MIN_RPM:.0f} RPM", flush=True)
+        else:
+            print("Drive integral needs --caster-mode; ignored", flush=True)
     if caster_mode:
         print(f"Base control: powered-caster mode (steer while driving), {1.0 / CASTER_CONTROL_PERIOD_S:.0f} Hz", flush=True)
     log_file = log_writer = None
@@ -678,11 +729,14 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_m
                 drive_ramp = 0.0
                 for device in range(1, 9):
                     rack.set_velocity(device, 0.0)
+                drive_i = {drive_id: (0.0, 0.0) for drive_id in DRIVE_IDS}
                 if armed:
                     rack.disarm()
                     armed = False
             elif caster_mode:
                 drive_scale, max_error = caster_step(rack, velocity, targets)
+                if drive_integral:
+                    update_drive_integral(rack, drive_i, period)
                 drive_ready = True
                 if not armed:
                     rack.arm()
@@ -767,10 +821,16 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_m
                 if not armed:
                     rack.arm()
                     armed = True
+            # Print the status whenever its kind changes (numbers such as the
+            # voltage are ignored), so stops are visible without the phone.
+            status_kind = re.sub(r"[-+\d.]+", "#", state.status)
+            if status_kind != last_status_kind:
+                print(f"[{time.strftime('%H:%M:%S')}] base: {state.status}", flush=True)
+                last_status_kind = status_kind
             if log_writer is not None:
                 log_writer.writerow(csv_row(
                     rack, targets, now - log_t0, enabled, drive_ready, drive_scale,
-                    max_error, voltage, requested, velocity, state.status,
+                    max_error, voltage, requested, velocity, state.status, drive_i,
                 ))
                 log_file.flush()
             if diagnostics and now - last_diagnostics >= 1.0:
@@ -784,9 +844,9 @@ def motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_m
             log_file.close()
 
 
-def guarded_motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_mode=False):
+def guarded_motor_loop(state, port, configure, diagnostics=False, log_csv=None, caster_mode=False, drive_integral=False):
     try:
-        motor_loop(state, port, configure, diagnostics, log_csv, caster_mode)
+        motor_loop(state, port, configure, diagnostics, log_csv, caster_mode, drive_integral)
     except Exception as exc:
         with state.lock:
             state.enabled = False
@@ -818,7 +878,8 @@ def main():
     parser.add_argument("--mobile-io-name", default="mobileIO")
     parser.add_argument("--xarm-ip", default="192.168.1.204")
     parser.add_argument(
-        "--pose-source", choices=("natural", "apriltag", "webxr"), default="natural"
+        "--pose-source", choices=("natural", "apriltag", "webxr", "buttons"), default="natural",
+        help="Phone page: camera-tracked arm (natural/apriltag/webxr) or arm buttons with gripper (buttons)"
     )
     parser.add_argument("--tls-cert", help="HTTPS certificate; required by Safari camera access")
     parser.add_argument("--tls-key", help="HTTPS private key")
@@ -826,6 +887,7 @@ def main():
     parser.add_argument("--diagnostics", action="store_true", help="Print caster angles and motor target/actual RPM once per second")
     parser.add_argument("--log-csv", help="Write per-control-period base telemetry (20 Hz; 50 Hz with --caster-mode) to this CSV file")
     parser.add_argument("--caster-mode", action="store_true", help="Powered-caster control: steer while driving instead of aligning first")
+    parser.add_argument("--drive-integral", action="store_true", help="Caster mode: host-side integral feedforward on the drive motors so they reach their target speed under load")
     parser.add_argument("--ros-bridge-port", type=int, help="Accept autonomous base twists from the ROS 2 cmd_vel bridge on this localhost UDP port")
     args = parser.parse_args()
     state = CommandState()
@@ -853,7 +915,8 @@ def main():
     if args.enable_motors:
         motor_thread = threading.Thread(
             target=guarded_motor_loop,
-            args=(state, args.can_port, args.configure_sparks, args.diagnostics, args.log_csv, args.caster_mode),
+            args=(state, args.can_port, args.configure_sparks, args.diagnostics, args.log_csv, args.caster_mode,
+                  args.drive_integral),
             daemon=True,
         )
         motor_thread.start()

@@ -99,6 +99,9 @@ class SparkMaxRack:
             self.ks_full_rpm = {i: full_rpm for i in self.device_ids}
         self._duties = {i: 0.0 for i in self.device_ids}
         self._rpms = {i: 0.0 for i in self.device_ids}
+        # Caller-supplied feedforward (volts) added on top of kS, e.g. a host-side
+        # integral term; cleared by disarm().
+        self._extra_ff = {i: 0.0 for i in self.device_ids}
         self.telemetry: Dict[int, Telemetry] = {i: Telemetry() for i in self.device_ids}
         self._enable_output = False
         self._run = False
@@ -208,6 +211,13 @@ class SparkMaxRack:
             for i in self.device_ids:
                 self._duties[i] = 0.0
                 self._rpms[i] = 0.0
+                self._extra_ff[i] = 0.0
+
+    def set_extra_feedforward(self, device_id: int, volts: float, limit: float = 2.0) -> None:
+        """Add `volts` of arbitrary feedforward to this device's velocity setpoint."""
+        volts = max(-limit, min(limit, float(volts)))
+        with self._lock:
+            self._extra_ff[device_id] = volts if math.isfinite(volts) else 0.0
 
     def set_duty(self, device_id: int, duty: float) -> None:
         duty = max(-self.max_duty, min(self.max_duty, float(duty)))
@@ -268,6 +278,7 @@ class SparkMaxRack:
                 enable = self._enable_output
                 duties = dict(self._duties)
                 rpms = dict(self._rpms)
+                extra_ff = dict(self._extra_ff)
                 send_frc = enable or self._frc_heartbeat_active
                 self._frc_heartbeat_active = enable
             with self._bus_lock:
@@ -291,6 +302,8 @@ class SparkMaxRack:
                             )
                         else:
                             ff = 0.0
+                        if enable:
+                            ff += extra_ff[i]
                         frames.append((ID_VELOCITY_SETPOINT(i), encode_velocity(rpm, ff)))
                     else:
                         frames.append((ID_DUTY_CYCLE_SETPOINT(i), encode_duty(duties[i] if enable else 0.0)))

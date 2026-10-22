@@ -21,21 +21,69 @@ PHONE_FULL_ROTATION_DEG = 20.0
 DEVICE_CAMERA_OFFSET = (0.0, 0.02, -0.04)
 POSITION_DEADZONE_M = 0.003
 ROTATION_DEADZONE_DEG = 0.8
-VISION_LINEAR_DEADZONE_MM_S = 5.0
+VISION_LINEAR_DEADZONE_MM_S = 10.0
 VISION_ANGULAR_DEADZONE_DEG_S = 0.8
 VISION_MAX_FRAME_GAP_S = 0.20
 PHONE_FULL_LINEAR_SPEED_MM_S = 100.0
 PHONE_FULL_ANGULAR_SPEED_DEG_S = 45.0
-VISION_MAX_MEASURED_LINEAR_MM_S = 200.0
+VISION_MAX_MEASURED_LINEAR_MM_S = 150.0
 VISION_MAX_MEASURED_ANGULAR_DEG_S = 90.0
-VISION_VELOCITY_FILTER_ALPHA = 0.22
+VISION_VELOCITY_FILTER_ALPHA = 0.12
 VISION_IDLE_DECAY = 0.35
 VISION_ANGULAR_IDLE_DECAY = 0.10
 TRANSLATION_ACCEL_MM_S2 = 350.0
 ROTATION_ACCEL_DEG_S2 = 100.0
-WRIST_SOFT_LIMIT_DEG = 330.0
-WRIST_STOP_LIMIT_DEG = 350.0
+# J4/J6 wind-up guard. Following the phone's rotation wound J4 to -323 deg and J6 to
+# 250 deg (2026-10-21); the gripper then jammed against the front and both servos
+# faulted. Slow from SOFT and stop at STOP; the stow button unwinds the wrist.
+WRIST_SOFT_LIMIT_DEG = 150.0
+WRIST_STOP_LIMIT_DEG = 180.0
 WRIST_LIMIT_JOINT_INDICES = (3, 5)  # J4 and J6
+# xArm Gripper positions (0 = closed, 850 = fully open) and speed (pulses/s).
+# Phone-camera follow (natural/apriltag pages): cap translation well below the
+# button speed and ignore the phone's rotation by default. Hand-held phones
+# tilt while being moved; following that made the tool orientation wander
+# (48 % of commands rotated, 2026-10-21) and drove the arm into error 31.
+VISION_MAX_TRANSLATION_MM_S = 80.0
+VISION_FOLLOW_ROTATION = False
+# Flange workspace box in the arm base frame (mm). The base is 430 mm above the
+# floor and the gripper is ~170 mm long, so z >= -230 keeps the fingers ~3 cm
+# off the floor. Commands pushing further out of the box are zeroed per axis.
+WORKSPACE_MM = {0: (150.0, 650.0), 1: (-400.0, 400.0), 2: (-230.0, 500.0)}
+# Reach limit: flange distance from the shoulder (J2 axis, 267 mm above the base).
+# Near full extension (~740 mm) small Cartesian speeds need huge joint speeds and
+# the controller stops with error 24 (2026-10-21: 751 mm, x=570, z=-221). Outward
+# motion slows from REACH_SLOW_MM and stops at REACH_MAX_MM; inward is always allowed.
+SHOULDER_MM = (0.0, 0.0, 267.0)
+# Front keep-out above the bumper and camera (flange, arm base frame, mm): inside it the
+# flange may not move further down or back toward the robot.
+FRONT_KEEPOUT_X_MM = 300.0
+FRONT_KEEPOUT_Z_MM = 120.0
+REACH_SLOW_MM = 600.0
+REACH_MAX_MM = 650.0
+# Stow pose for driving (chosen 2026-10-21): flange 207 mm ahead of the base,
+# 375 mm up, gripper down; folded above the front camera, ~2 cm past the bumper.
+STOW_JOINTS_DEG = [0.0, -60.0, -20.0, 0.0, 80.0, 0.0]
+STOW_SPEED_DEG_S = 20.0
+STOW_ACC_DEG_S2 = 200.0
+STOW_TOLERANCE_DEG = 0.5
+STOW_TIMEOUT_S = 30.0
+# Recovery (stow button, also clears controller errors): within STOW_DIRECT_DEG of the
+# stow pose on every joint go there directly, else lift first (J2, J3), swing J1 to the
+# front, straighten the wrist, then fold. Starting low beside the chassis, a direct
+# joint move or swinging J1 first would sweep the arm across the chassis and camera.
+STOW_DIRECT_DEG = 30.0
+# Every recovery step is checked with forward kinematics first: the flange must stay
+# above this height (arm base frame) so pointing-down fingertips stay ~3 cm off the floor.
+MIN_FLANGE_Z_MM = -230.0
+# Gripper payload, set after every enable (not saved to the controller). With the
+# default 0 kg the controller's current model misses the ~0.8 kg gripper and
+# trips error 31 ("abnormal current") in extended, low poses.
+GRIPPER_LOAD_KG = 0.82
+GRIPPER_COM_MM = [0.0, 0.0, 48.0]
+GRIPPER_OPEN_POS = 850
+GRIPPER_CLOSED_POS = 0
+GRIPPER_SPEED = 3000
 
 
 def shaped_axis(delta, full_scale, deadzone):
@@ -167,6 +215,8 @@ class CommandState:
         self.pose_hz_count = 0
         self.status = "等待手机命令"
         self.stop_requested = False
+        self.gripper_request = None
+        self.stow_request = False
 
     def update(self, data):
         seq = int(data.get("seq", -1))
@@ -184,6 +234,17 @@ class CommandState:
             self.velocity = velocity
             self.last_rx = time.monotonic()
             return True
+
+    def request_stow(self):
+        with self.lock:
+            self.stow_request = True
+
+    def request_gripper(self, action):
+        positions = {"open": GRIPPER_OPEN_POS, "close": GRIPPER_CLOSED_POS}
+        if action not in positions:
+            raise ValueError("gripper action must be 'open' or 'close'")
+        with self.lock:
+            self.gripper_request = positions[action]
 
     def update_pose(self, data):
         seq = int(data.get("seq", -1))
@@ -273,6 +334,21 @@ class CommandState:
         rot = tuple(value / rot_norm for value in rot)
         now = time.monotonic()
         with self.lock:
+            # Summarize the phone's tracking stream every 2 s, held or not, so a
+            # page that never locks (or never enables the arm) is visible.
+            tag_rx = getattr(self, "tag_rx", None) or {"t0": now, "n": 0, "held": 0, "inliers": []}
+            tag_rx["n"] += 1
+            tag_rx["held"] += int(enabled)
+            tracking = data.get("tracking") or {}
+            if "inliers" in tracking:
+                tag_rx["inliers"].append(int(tracking["inliers"]))
+            if now - tag_rx["t0"] >= 2.0:
+                inl = tag_rx["inliers"]
+                print(f"[arm-tag] {tag_rx['n'] / (now - tag_rx['t0']):.1f} Hz from phone, "
+                      f"arm button held {tag_rx['held']}/{tag_rx['n']}, "
+                      f"inliers {min(inl) if inl else '-'}..{max(inl) if inl else '-'}", flush=True)
+                tag_rx = {"t0": now, "n": 0, "held": 0, "inliers": []}
+            self.tag_rx = tag_rx
             if seq <= self.last_seq:
                 return False
             self.last_seq = seq
@@ -330,6 +406,9 @@ class CommandState:
                     shaped_velocity(value, PHONE_FULL_ANGULAR_SPEED_DEG_S, VISION_ANGULAR_DEADZONE_DEG_S)
                     for value in self.filtered_rot_velocity
                 ]
+                pos_command = [value * VISION_MAX_TRANSLATION_MM_S / TRANSLATION_SPEED_MM_S for value in pos_command]
+                if not VISION_FOLLOW_ROTATION:
+                    rot_command = [0.0] * 3
                 self.enabled = True
                 self.velocity = pos_command + rot_command
                 self.pose_hz_count += 1
@@ -440,6 +519,128 @@ def wrist_limit_scale(angles):
     return margin_scale
 
 
+def recovery_plan(start):
+    """Joint waypoints from `start` (6 joint angles, deg) to STOW_JOINTS_DEG."""
+    stow = STOW_JOINTS_DEG
+    if max(abs(a - b) for a, b in zip(start, stow)) < STOW_DIRECT_DEG:
+        return [("stow", list(stow))]
+    j = list(start)
+    plan = []
+
+    def step(name, **joints):
+        for key, value in joints.items():
+            j[int(key[1]) - 1] = value
+        plan.append((name, list(j)))
+
+    step("lift shoulder (J2 -> 0)", j2=0.0)
+    step("open elbow (J3 -> -60)", j3=-60.0)
+    step("swing to the front (J1)", j1=stow[0])
+    step("straighten wrist (J4, J5, J6)", j4=stow[3], j5=stow[4], j6=stow[5])
+    step("fold into stow (J2, J3)", j2=stow[1], j3=stow[2])
+    return plan
+
+
+def plan_lowest_flange(arm, start, plan, samples=25):
+    """Lowest flange z (mm) along the joint-space interpolation of every step, by forward kinematics."""
+    lowest = math.inf
+    previous = start
+    for _, target in plan:
+        for k in range(samples + 1):
+            q = [a + k / samples * (b - a) for a, b in zip(previous, target)]
+            code, fk = arm.get_forward_kinematics(q, input_is_radian=False, return_is_radian=False)
+            if code != 0:
+                raise RuntimeError(f"forward kinematics failed: {code}")
+            lowest = min(lowest, fk[2])
+        previous = target
+    return lowest
+
+
+def enable_arm(arm):
+    """Enable the arm in Cartesian velocity mode with the gripper payload and gripper set up."""
+    for name, code in (("motion_enable", arm.motion_enable(enable=True)), ("set_mode(0)", arm.set_mode(0)),
+                       ("set_state(0)", arm.set_state(0))):
+        if code != 0:
+            raise RuntimeError(f"{name} failed: {code}")
+    time.sleep(0.5)
+    for name, code in (("set_mode(5)", arm.set_mode(5)), ("set_state(0)", arm.set_state(0))):
+        if code != 0:
+            raise RuntimeError(f"{name} failed: {code}")
+    time.sleep(0.5)
+    # The controller rejects set_tcp_load (code 9) until the arm is enabled.
+    code = arm.set_tcp_load(GRIPPER_LOAD_KG, GRIPPER_COM_MM)
+    print(f"[arm] gripper payload {GRIPPER_LOAD_KG} kg -> code {code}, tcp_load now {arm.tcp_load}", flush=True)
+    gripper_ok = all(code == 0 for code in (
+        arm.set_gripper_enable(True), arm.set_gripper_mode(0), arm.set_gripper_speed(GRIPPER_SPEED)))
+    if not gripper_ok:
+        print("[arm] gripper not available; open/close requests will be ignored", flush=True)
+
+
+def recover_to_stow(arm, state):
+    """Clear any controller error, then move to STOW_JOINTS_DEG along recovery_plan().
+
+    Holding the arm button (a fresh enabled command) aborts the motion. Returns the
+    outcome; raises if the arm cannot be enabled, the plan dips below MIN_FLANGE_Z_MM,
+    or the controller faults on the way.
+    """
+    with state.lock:
+        state.status = "正在清除错误并收纳；按住机械臂按钮可中止"
+    try:
+        arm.vc_set_cartesian_velocity([0.0] * 6, is_radian=False, duration=0.1)
+    except Exception:
+        pass
+    if arm.error_code != 0 or arm.warn_code != 0:
+        print(f"[arm] clearing error {arm.error_code} / warning {arm.warn_code}", flush=True)
+    arm.clean_error()
+    arm.clean_warn()
+    time.sleep(0.5)
+    for name, code in (("motion_enable", arm.motion_enable(enable=True)), ("set_mode(0)", arm.set_mode(0)),
+                       ("set_state(0)", arm.set_state(0))):
+        if code != 0:
+            raise RuntimeError(f"recovery {name} failed: {code} (arm error {arm.error_code})")
+    time.sleep(0.3)
+    arm.set_tcp_load(GRIPPER_LOAD_KG, GRIPPER_COM_MM)
+    code, joints = arm.get_servo_angle(is_radian=False)
+    if code != 0:
+        raise RuntimeError(f"cannot read joints: {code}")
+    start = joints[:6]
+    plan = recovery_plan(start)
+    lowest = plan_lowest_flange(arm, start, plan)
+    if lowest < MIN_FLANGE_Z_MM:
+        raise RuntimeError(f"recovery path would take the flange to z={lowest:.0f} mm; move the arm up first")
+    print(f"[arm] stow from {[round(v, 1) for v in start]} in {len(plan)} step(s), lowest flange z {lowest:.0f} mm",
+          flush=True)
+    outcome = "reached"
+    for name, target in plan:
+        code = arm.set_servo_angle(angle=target, speed=STOW_SPEED_DEG_S, mvacc=STOW_ACC_DEG_S2,
+                                   is_radian=False, wait=False)
+        if code != 0:
+            raise RuntimeError(f"stow step '{name}' failed: {code}")
+        step_start = time.monotonic()
+        while True:
+            time.sleep(CONTROL_PERIOD_S)
+            with state.lock:
+                interrupt = state.enabled and time.monotonic() - state.last_rx <= COMMAND_TIMEOUT_S
+            if interrupt or state.stop_requested:
+                arm.set_state(4)  # stop the joint motion now
+                outcome = "aborted by the operator"
+                break
+            if arm.error_code != 0:
+                raise RuntimeError(f"xArm error {arm.error_code} during stow step '{name}'")
+            if max(abs(a - b) for a, b in zip(arm.angles[:6], target)) < STOW_TOLERANCE_DEG:
+                break
+            if time.monotonic() - step_start > STOW_TIMEOUT_S:
+                arm.set_state(4)
+                outcome = f"timed out in step '{name}'"
+                break
+        if outcome != "reached":
+            break
+        print(f"[arm] stow step done: {name}", flush=True)
+    print(f"[arm] stow {outcome}", flush=True)
+    time.sleep(0.2)
+    enable_arm(arm)
+    return outcome
+
+
 def arm_loop(state, ip, motion_enabled):
     arm = None
     last_sent = None
@@ -451,30 +652,57 @@ def arm_loop(state, ip, motion_enabled):
         arm = XArmAPI(ip, is_radian=False)
         if not arm.connected:
             raise RuntimeError(f"could not connect to xArm at {ip}")
+        # A faulted controller (at start-up or later) is not fatal: velocity and gripper
+        # commands are ignored until the stow button clears the error and retracts the arm.
         code, errors = arm.get_err_warn_code()
-        if code != 0 or errors[0] != 0:
-            raise RuntimeError(f"xArm is faulted: api={code}, error/warn={errors}")
-        if motion_enabled:
-            for name, code in (
-                ("motion_enable", arm.motion_enable(enable=True)),
-                ("set_mode(0)", arm.set_mode(0)),
-                ("set_state(0)", arm.set_state(0)),
-            ):
-                if code != 0:
-                    raise RuntimeError(f"{name} failed: {code}")
-            time.sleep(0.5)
-            for name, code in (
-                ("set_mode(5)", arm.set_mode(5)),
-                ("set_state(0)", arm.set_state(0)),
-            ):
-                if code != 0:
-                    raise RuntimeError(f"{name} failed: {code}")
-            time.sleep(0.5)
+        faulted = code != 0 or errors[0] != 0
+        if faulted:
+            print(f"[arm] controller faulted at start-up: api={code}, error/warn={errors}; press stow to recover",
+                  flush=True)
+        elif motion_enabled:
+            enable_arm(arm)
         with state.lock:
             state.status = "已连接；按住方向键移动" if motion_enabled else "预览模式；不会移动"
+        last_status = None
 
         while not state.stop_requested:
             started = time.monotonic()
+            with state.lock:
+                stow, state.stow_request = state.stow_request, False
+            if stow and motion_enabled:
+                try:
+                    recover_to_stow(arm, state)
+                    faulted = False
+                except Exception as exc:
+                    faulted = True
+                    print(f"[arm] stow/recovery failed: {exc}", flush=True)
+                smoothed = [0.0] * 6
+                last_sent = None
+                previous_angles = None
+                blocked_outward_command = None
+            if motion_enabled and not faulted and arm.error_code != 0:
+                faulted = True
+                print(f"[arm] controller error {arm.error_code}; press stow to clear it and retract", flush=True)
+            if faulted:
+                with state.lock:
+                    state.velocity = [0.0] * 6
+                    state.gripper_request = None
+                    code = arm.error_code
+                    if 11 <= code <= 17:  # joint servo faults: clean_error cannot reset these
+                        state.status = f"机械臂伺服故障 C{code}：先按急停并复位，再点“收纳”"
+                    else:
+                        state.status = f"机械臂错误 C{code}：点“收纳”清除并回收"
+                    status = state.status
+                if status != last_status:
+                    print(f"[{time.strftime('%H:%M:%S')}] arm: {status}", flush=True)
+                    last_status = status
+                time.sleep(CONTROL_PERIOD_S)
+                continue
+            with state.lock:
+                gripper_target, state.gripper_request = state.gripper_request, None
+            if gripper_target is not None and motion_enabled:
+                code = arm.set_gripper_position(gripper_target, wait=False)
+                print(f"[arm] gripper -> {gripper_target} (code {code})", flush=True)
             with state.lock:
                 fresh = started - state.last_rx <= COMMAND_TIMEOUT_S
                 active = motion_enabled and state.enabled and fresh
@@ -552,6 +780,35 @@ def arm_loop(state, ip, motion_enabled):
                 # Deadman release and stale-command stops remain immediate.
                 smoothed[:] = [0.0] * 6
                 target = smoothed[:]
+            if active:
+                # Keep the flange inside WORKSPACE_MM: drop velocity components that
+                # would push it further out (moving back in is always allowed).
+                position = arm.position
+                for axis, (low, high) in WORKSPACE_MM.items():
+                    if (position[axis] <= low and target[axis] < 0.0) or (position[axis] >= high and target[axis] > 0.0):
+                        if target[axis] != 0.0 and started - state.last_motion_log >= 0.5:
+                            print(f"[arm-limit] workspace {'xyz'[axis]}={position[axis]:.0f} mm; "
+                                  f"blocking outward motion", flush=True)
+                        target[axis] = 0.0
+                        smoothed[axis] = 0.0
+                if position[0] < FRONT_KEEPOUT_X_MM and position[2] < FRONT_KEEPOUT_Z_MM:
+                    for axis in (0, 2):  # no further back (-x) or down (-z) over the front
+                        if target[axis] < 0.0:
+                            if started - state.last_motion_log >= 0.5:
+                                print(f"[arm-limit] front keep-out at x={position[0]:.0f}, z={position[2]:.0f} mm; "
+                                      f"blocking {'-x' if axis == 0 else '-z'}", flush=True)
+                            target[axis] = 0.0
+                            smoothed[axis] = 0.0
+                radial = [p - s for p, s in zip(position[:3], SHOULDER_MM)]
+                reach = math.sqrt(dot_product(radial, radial))
+                outward = dot_product(target[:3], radial) / max(reach, 1e-6)
+                if reach > REACH_SLOW_MM and outward > 0.0:
+                    keep = max(0.0, (REACH_MAX_MM - reach) / (REACH_MAX_MM - REACH_SLOW_MM))
+                    for axis in range(3):
+                        target[axis] -= (1.0 - keep) * outward * radial[axis] / reach
+                        smoothed[axis] = target[axis]
+                    if keep == 0.0 and started - state.last_motion_log >= 0.5:
+                        print(f"[arm-limit] reach {reach:.0f} mm; blocking outward motion", flush=True)
             if motion_enabled and (active or target != last_sent):
                 code = arm.vc_set_cartesian_velocity(
                     target,
@@ -560,7 +817,12 @@ def arm_loop(state, ip, motion_enabled):
                     duration=CONTROLLER_COMMAND_DURATION_S,
                 )
                 if code != 0:
-                    raise RuntimeError(f"velocity command failed: {code}")
+                    # Usually a controller fault (e.g. C24 joint speed, C31 current):
+                    # stop sending and wait for the stow button to recover.
+                    faulted = True
+                    print(f"[arm] velocity command failed ({code}), controller error {arm.error_code}; "
+                          f"press stow to clear it and retract", flush=True)
+                    continue
                 last_sent = target
             if active and started - state.last_motion_log >= 0.5:
                 print(
@@ -578,6 +840,10 @@ def arm_loop(state, ip, motion_enabled):
                     state.status = "待机；按住方向键移动" if motion_enabled else "预览模式；不会移动"
                 else:
                     state.status = "运行中" if motion_enabled else "预览命令中"
+                status = state.status
+            if status != last_status:
+                print(f"[{time.strftime('%H:%M:%S')}] arm: {status}", flush=True)
+                last_status = status
             time.sleep(max(0.0, CONTROL_PERIOD_S - (time.monotonic() - started)))
     except Exception as exc:
         with state.lock:
