@@ -1,0 +1,7 @@
+image: rtabmap_run3_ray_map.pgm
+mode: trinary
+resolution: 0.0500
+origin: [-3.0299, -4.4129, 0.0000]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.25

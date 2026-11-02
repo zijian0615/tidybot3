@@ -1,0 +1,8 @@
+# Patrol waypoints for base_link in the RTAB-Map "map" frame of export/rtabmap_run3_ray.db.
+# Picked at maximum wall clearance in rtabmap_run3_ray_map.pgm (clearance in comments).
+# yaw_deg: heading at arrival, counter-clockwise from map +x. The corridor runs at ~63 deg.
+waypoints:
+  - {name: corridor_mid, x: 0.77, y: 1.09, yaw_deg: 63}    # 0.65 m
+  - {name: corridor_end, x: 2.47, y: 4.09, yaw_deg: -20}   # 0.86 m
+  - {name: side_room,    x: 3.92, y: 3.34, yaw_deg: -20}   # 0.76 m
+  - {name: start,        x: -0.23, y: -0.21, yaw_deg: 63}  # 0.76 m

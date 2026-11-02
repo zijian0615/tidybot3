@@ -1,0 +1,18 @@
+# Patrol waypoints for base_link in the map frame of data/lab-ems885.db (clearance from
+# export/lab-ems885/lab-ems885_map.pgm in comments). The lab aisle runs at ~44 deg.
+# The mapping start (~0.2, 0.4) is avoided: the base cannot turn left in place there
+# (uneven floor; drive speed loop too weak, see nav2-demo-progress memory).
+waypoints:
+  - {name: lab_far,  x: 2.50, y: 2.45, yaw_deg: -136}  # 0.71 m, turn around here, face back down the aisle
+  - {name: park,     x: 1.10, y: 1.00, yaw_deg: 44}    # 0.62 m, parking spot mid-aisle facing in
+  # Grasp parking at the right-hand table (recorded 2026-10-21 by teleop; costmap 64 here, so Nav2
+  # goes to table_right_pre 0.5 m back and dock.py drives the last part on the RTAB-Map pose).
+  - {name: table_right,     x: 2.13, y: 1.42, yaw_deg: -48}
+  - {name: table_right_pre, x: 1.80, y: 1.79, yaw_deg: -48}  # costmap 0
+  # Corridor trash bin approach (estimated 2026-10-21 from the bin visit; costmap 0). bin_dock.py
+  # takes over from here with the front camera.
+  - {name: bin_trash_approach, x: 2.80, y: -0.70, yaw_deg: 87}
+  # Lab <-> corridor door: the mapped doorway is ~0.65 m wide, so the planner cannot pass it.
+  # Nav2 to door_lab, then `dock.py door_corridor --direct` drives the straight line through.
+  - {name: door_lab,      x: 0.22, y: -0.12, yaw_deg: -50}   # costmap 0, lab side
+  - {name: door_corridor, x: 1.12, y: -1.25, yaw_deg: -50}   # costmap 67, corridor side
