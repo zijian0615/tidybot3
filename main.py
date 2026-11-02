@@ -84,9 +84,9 @@ def main(args):
     if args.sim:
         from mujoco_env import MujocoEnv
         if args.teleop:
-            env = MujocoEnv(show_images=True)
+            env = MujocoEnv(show_images=True, arm=args.arm)
         else:
-            env = MujocoEnv()
+            env = MujocoEnv(arm=args.arm)
     else:
         from real_env import RealEnv
         env = RealEnv()
@@ -107,6 +107,7 @@ def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--sim', action='store_true')
+    parser.add_argument('--arm', default='gen3', choices=['gen3', 'xarm6'], help='the arm on the simulated base')
     parser.add_argument('--teleop', action='store_true')
     parser.add_argument('--save', action='store_true')
     parser.add_argument('--output-dir', default='data/demos')

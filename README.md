@@ -297,6 +297,14 @@ This section provides a more detailed look at each component of the codebase, wh
 
 ### Simulation environment
 
+The simulated base can carry the Kinova Gen3 with the Robotiq 2F-85 (`arm='gen3'`, the default) or a UFACTORY xArm6 with the xArm gripper (`arm='xarm6'`, see [`models/ufactory_xarm6`](models/ufactory_xarm6/README.md)):
+
+```bash
+python main.py --sim --teleop --arm xarm6
+```
+
+The observations and actions are the same for both arms: the end effector's pose in the base frame and the gripper's opening.
+
 This snippet demonstrates how to load the simulation environment on your dev machine and execute random actions:
 
 ```python

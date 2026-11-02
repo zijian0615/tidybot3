@@ -12,10 +12,18 @@ import numpy as np
 DAMPING_COEFF = 1e-12
 MAX_ANGLE_CHANGE = np.deg2rad(45)
 
+# Per arm: the gripperless model, and where the pinch site sits on its last link
+# with ee_offset = 0 (the gripper's length is added along the tool axis)
+ARMS = {
+    'gen3': dict(mjcf='models/kinova_gen3/gen3.xml', site_pos=(0.0, 0.0, -0.061525), axis_sign=-1.0),  # from the Kinova URDF
+    'xarm6': dict(mjcf='models/ufactory_xarm6/xarm6_nohand.xml', site_pos=(0.0, 0.0, 0.0), axis_sign=1.0),  # the flange
+}
+
 class IKSolver:
-    def __init__(self, ee_offset=0.0):
+    def __init__(self, ee_offset=0.0, arm='gen3'):
         # Load arm without gripper
-        self.model = mujoco.MjModel.from_xml_path('models/kinova_gen3/gen3.xml')
+        cfg = ARMS[arm]
+        self.model = mujoco.MjModel.from_xml_path(cfg['mjcf'])
         self.data = mujoco.MjData(self.model)
         self.model.body_gravcomp[:] = 1.0
 
@@ -26,7 +34,7 @@ class IKSolver:
         self.site_mat = self.data.site(self.site_id).xmat
 
         # Add end effector offset for gripper
-        self.model.site(self.site_id).pos = np.array([0.0, 0.0, -0.061525 - ee_offset])  # 0.061525 comes from the Kinova URDF
+        self.model.site(self.site_id).pos = np.array(cfg['site_pos']) + np.array([0.0, 0.0, cfg['axis_sign'] * ee_offset])
 
         # Preallocate arrays
         self.err = np.empty(6)

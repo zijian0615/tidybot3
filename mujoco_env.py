@@ -18,6 +18,25 @@ from ruckig import InputParameter, OutputParameter, Result, Ruckig
 from constants import POLICY_CONTROL_PERIOD
 from ik_solver import IKSolver
 
+# The arms the sim can mount on the base. qpos/velocity limits are radians; gripper_max is
+# the right driver joint's closed angle (gripper_pos 1.0)
+ARMS = {
+    'gen3': dict(
+        mjcf='models/stanford_tidybot/scene.xml', base_body='gen3/base_link', ee_offset=0.12,
+        retract=[0.0, -0.34906585, 3.14159265, -2.54818071, 0.0, -0.87266463, 1.57079633],
+        max_velocity=4 * [math.radians(80)] + 3 * [math.radians(140)],
+        max_acceleration=4 * [math.radians(240)] + 3 * [math.radians(450)],
+        gripper_joint='right_driver_joint', gripper_max=0.8,
+    ),
+    'xarm6': dict(
+        mjcf='models/stanford_tidybot/scene_xarm6.xml', base_body='xarm6/link_base', ee_offset=0.172,
+        retract=[0.0, -0.84125, -0.57072, 0.0, 1.41197, 0.0],
+        max_velocity=3 * [math.radians(80)] + 3 * [math.radians(140)],
+        max_acceleration=3 * [math.radians(240)] + 3 * [math.radians(450)],
+        gripper_joint='right_driver_joint', gripper_max=0.85,
+    ),
+}
+
 class ShmState:
     def __init__(self, existing_instance=None):
         arr = np.empty(3 + 3 + 4 + 1 + 1)
@@ -141,7 +160,7 @@ class BaseController:
             self.ctrl[:] = self.otg_out.new_position
 
 class ArmController:
-    def __init__(self, qpos, qvel, ctrl, qpos_gripper, ctrl_gripper, timestep):
+    def __init__(self, qpos, qvel, ctrl, qpos_gripper, ctrl_gripper, timestep, arm='gen3'):
         self.qpos = qpos
         self.qvel = qvel
         self.ctrl = ctrl
@@ -149,21 +168,23 @@ class ArmController:
         self.ctrl_gripper = ctrl_gripper
 
         # IK solver
-        self.ik_solver = IKSolver(ee_offset=0.12)
+        cfg = ARMS[arm]
+        self.ik_solver = IKSolver(ee_offset=cfg['ee_offset'], arm=arm)
+        self.retract_qpos = np.array(cfg['retract'])
 
         # OTG (online trajectory generation)
-        num_dofs = 7
+        num_dofs = len(cfg['retract'])
         self.last_command_time = None
         self.otg = Ruckig(num_dofs, timestep)
         self.otg_inp = InputParameter(num_dofs)
         self.otg_out = OutputParameter(num_dofs)
-        self.otg_inp.max_velocity = 4 * [math.radians(80)] + 3 * [math.radians(140)]
-        self.otg_inp.max_acceleration = 4 * [math.radians(240)] + 3 * [math.radians(450)]
+        self.otg_inp.max_velocity = cfg['max_velocity']
+        self.otg_inp.max_acceleration = cfg['max_acceleration']
         self.otg_res = None
 
     def reset(self):
         # Initialize arm in "retract" configuration
-        self.qpos[:] = np.array([0.0, -0.34906585, 3.14159265, -2.54818071, 0.0, -0.87266463, 1.57079633])
+        self.qpos[:] = self.retract_qpos
         self.ctrl[:] = self.qpos
         self.ctrl_gripper[:] = 0.0
 
@@ -203,7 +224,7 @@ class ArmController:
             self.ctrl[:] = self.otg_out.new_position
 
 class MujocoSim:
-    def __init__(self, mjcf_path, command_queue, shm_state, show_viewer=True):
+    def __init__(self, mjcf_path, command_queue, shm_state, show_viewer=True, arm='gen3'):
         self.model = mujoco.MjModel.from_xml_path(mjcf_path)
         self.data = mujoco.MjData(self.model)
         self.command_queue = command_queue
@@ -217,21 +238,25 @@ class MujocoSim:
                 self.model.body_gravcomp[self.model.body(object_name).id] = 0.0
 
         # Cache references to array slices
+        cfg = ARMS[arm]
+        self.gripper_max = cfg['gripper_max']
         base_dofs = self.model.body('base_link').jntnum.item()
-        arm_dofs = 7
+        arm_dofs = len(cfg['retract'])
         self.qpos_base = self.data.qpos[:base_dofs]
         qvel_base = self.data.qvel[:base_dofs]
         ctrl_base = self.data.ctrl[:base_dofs]
         qpos_arm = self.data.qpos[base_dofs:(base_dofs + arm_dofs)]
         qvel_arm = self.data.qvel[base_dofs:(base_dofs + arm_dofs)]
         ctrl_arm = self.data.ctrl[base_dofs:(base_dofs + arm_dofs)]
-        self.qpos_gripper = self.data.qpos[(base_dofs + arm_dofs):(base_dofs + arm_dofs + 1)]
+        gripper_adr = self.model.joint(cfg['gripper_joint']).qposadr.item()
+        self.qpos_gripper = self.data.qpos[gripper_adr:(gripper_adr + 1)]
         ctrl_gripper = self.data.ctrl[(base_dofs + arm_dofs):(base_dofs + arm_dofs + 1)]
-        self.qpos_cube = self.data.qpos[(base_dofs + arm_dofs + 8):(base_dofs + arm_dofs + 8 + 7)]  # 8 for gripper qpos, 7 for cube qpos
+        cube_adr = self.model.jnt_qposadr[self.model.body('cube').jntadr.item()]
+        self.qpos_cube = self.data.qpos[cube_adr:(cube_adr + 7)]  # The cube's free joint
 
         # Controllers
         self.base_controller = BaseController(self.qpos_base, qvel_base, ctrl_base, self.model.opt.timestep)
-        self.arm_controller = ArmController(qpos_arm, qvel_arm, ctrl_arm, self.qpos_gripper, ctrl_gripper, self.model.opt.timestep)
+        self.arm_controller = ArmController(qpos_arm, qvel_arm, ctrl_arm, self.qpos_gripper, ctrl_gripper, self.model.opt.timestep, arm=arm)
 
         # Shared memory state for observations
         self.shm_state = ShmState(existing_instance=shm_state)
@@ -241,7 +266,7 @@ class MujocoSim:
         self.site_xpos = self.data.site(site_id).xpos
         self.site_xmat = self.data.site(site_id).xmat
         self.site_quat = np.empty(4)
-        self.base_height = self.model.body('gen3/base_link').pos[2]
+        self.base_height = self.model.body(cfg['base_body']).pos[2]
         self.base_rot_axis = np.array([0.0, 0.0, 1.0])
         self.base_quat_inv = np.empty(4)
 
@@ -292,7 +317,7 @@ class MujocoSim:
         mujoco.mju_mulQuat(self.shm_state.arm_quat, self.base_quat_inv, self.site_quat)  # Arm quat in local frame
 
         # Update gripper pos
-        self.shm_state.gripper_pos[:] = self.qpos_gripper / 0.8  # right_driver_joint, joint range [0, 0.8]
+        self.shm_state.gripper_pos[:] = self.qpos_gripper / self.gripper_max  # right_driver_joint, 0 open .. gripper_max closed
 
         # Notify reset() function that state has been initialized
         self.shm_state.initialized[:] = 1.0
@@ -311,8 +336,9 @@ class MujocoSim:
                 mujoco.mj_step(self.model, self.data)
 
 class MujocoEnv:
-    def __init__(self, render_images=True, show_viewer=True, show_images=False):
-        self.mjcf_path = 'models/stanford_tidybot/scene.xml'
+    def __init__(self, render_images=True, show_viewer=True, show_images=False, arm='gen3'):
+        self.arm = arm
+        self.mjcf_path = ARMS[arm]['mjcf']
         self.render_images = render_images
         self.show_viewer = show_viewer
         self.show_images = show_images
@@ -339,7 +365,7 @@ class MujocoEnv:
 
     def physics_loop(self):
         # Create sim
-        sim = MujocoSim(self.mjcf_path, self.command_queue, self.shm_state, show_viewer=self.show_viewer)
+        sim = MujocoSim(self.mjcf_path, self.command_queue, self.shm_state, show_viewer=self.show_viewer, arm=self.arm)
 
         # Start render loop
         if self.render_images:
